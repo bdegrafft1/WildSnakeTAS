@@ -1,39 +1,36 @@
 -- BizHawk Lua
 -- 12x26 Snake Grid Visualizer
 --
+-- Phase 1:
+--   Detect individual known snake sprite values
+--   instead of requiring one exact horizontal snake.
+--
 -- DISPLAY:
---   Black = empty
---   Green = detected horizontal snake
+--   Black = empty / unknown
+--   Green = known snake tile
 --
 -- CONSOLE:
---   Head address
---   Address delta
---   Calculated row/column
+--   Debug information only
 --
--- CURRENT OBSERVATIONS:
+-- Observed memory geometry:
 --
--- Normal downward movement:
---   +0x80
+--   Down 1 row  = +0x80
+--   Right 1 col = +0x04   (current hypothesis)
 --
--- Example:
---   0x0CA8 -> 0x0D28 = +0x80
---   0x0D28 -> 0x0DA8 = +0x80
+-- Known sprite values:
 --
--- Observed combined movement:
---   0x0C24 -> 0x0CA8 = +0x84
---
--- Working hypothesis:
---   Y step = 0x80
---   X step = 0x04
+--   2D = known head/orientation sprite
+--   25 = known body sprite
+--   23 = known tail sprite
 
 local DOMAIN = "WRAM"
 
 
 -- ============================================================
--- GRID SETTINGS
+-- GRID
 -- ============================================================
 
-local GRID_WIDTH = 12
+local GRID_WIDTH  = 12
 local GRID_HEIGHT = 26
 
 local CELL_PIXELS = 8
@@ -41,26 +38,25 @@ local PANEL_MARGIN = 8
 
 
 -- ============================================================
--- MEMORY MAPPING
+-- MEMORY
 -- ============================================================
-
-local ROW_STRIDE = 0x80
-local COLUMN_STRIDE = 0x04
 
 local START_ADDR = 0x0A00
-local END_ADDR = 0x1150
+local END_ADDR   = 0x1150
+
+local ROW_STRIDE    = 0x80
+local COLUMN_STRIDE = 0x04
 
 
 -- ============================================================
--- REFERENCE POSITION
+-- REFERENCE
 --
--- 0x0C24 was observed during the falling sequence.
+-- Current provisional anchor:
 --
--- Current provisional mapping:
---   0x0C24 = row 15, column 3
+--   address 0x0C24
+--   row 15
+--   column 3
 --
--- We can adjust REFERENCE_COLUMN later without changing
--- the underlying X/Y stride logic.
 -- ============================================================
 
 local REFERENCE_ADDRESS = 0x0C24
@@ -69,10 +65,18 @@ local REFERENCE_COLUMN = 3
 
 
 -- ============================================================
--- SNAKE
+-- KNOWN SNAKE SPRITES
 -- ============================================================
 
-local SNAKE_LENGTH = 6
+local SNAKE_TILES = {
+
+    [0x2D] = true,
+
+    [0x25] = true,
+
+    [0x23] = true
+
+}
 
 
 -- ============================================================
@@ -100,11 +104,11 @@ client.SetGameExtraPadding(
 -- STATE
 -- ============================================================
 
-local lastHead = nil
+local previousMatches = ""
 
 
 -- ============================================================
--- MEMORY HELPER
+-- MEMORY
 -- ============================================================
 
 local function readByte(address)
@@ -117,35 +121,9 @@ local function readByte(address)
 end
 
 
--- ============================================================
--- FIND HORIZONTAL SNAKE
---
--- Searches for:
---
---   2D ?? 25 ?? 25 ?? 25 ?? 25 ?? 23
---
--- ============================================================
+local function isSnakeTile(value)
 
-local function findHorizontalSnake()
-
-    for address = START_ADDR, END_ADDR - 10, 2 do
-
-        if
-            readByte(address) == 0x2D and
-            readByte(address + 2) == 0x25 and
-            readByte(address + 4) == 0x25 and
-            readByte(address + 6) == 0x25 and
-            readByte(address + 8) == 0x25 and
-            readByte(address + 10) == 0x23
-        then
-
-            return address
-
-        end
-
-    end
-
-    return nil
+    return SNAKE_TILES[value] == true
 
 end
 
@@ -160,42 +138,42 @@ local function addressToGrid(address)
         address - REFERENCE_ADDRESS
 
 
-    -- --------------------------------------------------------
-    -- Estimate vertical movement.
-    --
-    -- Using floor here handles positive falling addresses.
-    -- --------------------------------------------------------
-
+    -- Find nearest logical row.
     local rowDelta
 
     if delta >= 0 then
 
         rowDelta =
-            math.floor(delta / ROW_STRIDE)
+            math.floor(
+                delta / ROW_STRIDE
+            )
 
     else
 
         rowDelta =
-            math.ceil(delta / ROW_STRIDE)
+            math.ceil(
+                delta / ROW_STRIDE
+            )
 
     end
 
 
-    -- --------------------------------------------------------
-    -- Remove vertical portion.
-    -- --------------------------------------------------------
-
-    local horizontalBytes =
+    local remainder =
         delta -
         rowDelta * ROW_STRIDE
 
 
-    -- --------------------------------------------------------
-    -- Remaining bytes represent horizontal movement.
-    -- --------------------------------------------------------
+    -- Must fall exactly on our hypothesised
+    -- 4-byte column boundaries.
+    if remainder % COLUMN_STRIDE ~= 0 then
+
+        return nil, nil
+
+    end
+
 
     local columnDelta =
-        horizontalBytes / COLUMN_STRIDE
+        remainder / COLUMN_STRIDE
 
 
     local row =
@@ -208,65 +186,142 @@ local function addressToGrid(address)
         columnDelta
 
 
+    -- Reject anything outside our 12x26 board.
+    if
+        row < 0 or
+        row >= GRID_HEIGHT or
+        column < 0 or
+        column >= GRID_WIDTH
+    then
+
+        return nil, nil
+
+    end
+
+
     return row, column
 
 end
 
 
 -- ============================================================
--- CONSOLE LOGGING
---
--- Only logs when address changes.
+-- SCAN KNOWN SPRITE VALUES
 -- ============================================================
 
-local function logHead(address)
+local function findSnakeTiles()
 
-    if address == nil then
-        return
+    local matches = {}
+
+
+    -- Scan every byte for now.
+    --
+    -- This is intentional. We don't yet know whether all
+    -- orientation sprites always occupy even addresses.
+    for address = START_ADDR, END_ADDR do
+
+        local value =
+            readByte(address)
+
+
+        if isSnakeTile(value) then
+
+            local row, column =
+                addressToGrid(address)
+
+
+            if row ~= nil and column ~= nil then
+
+                matches[#matches + 1] = {
+
+                    address = address,
+
+                    value = value,
+
+                    row = row,
+
+                    column = column
+
+                }
+
+            end
+
+        end
+
     end
 
-    if address == lastHead then
-        return
+
+    return matches
+
+end
+
+
+-- ============================================================
+-- LOG ONLY WHEN MATCH SET CHANGES
+-- ============================================================
+
+local function logMatches(matches)
+
+    local signature = ""
+
+
+    for i = 1, #matches do
+
+        local match =
+            matches[i]
+
+
+        signature =
+            signature ..
+            string.format(
+                "%04X:%02X:%d:%d|",
+                match.address,
+                match.value,
+                match.column,
+                match.row
+            )
+
     end
 
 
-    local row, column =
-        addressToGrid(address)
+    if signature == previousMatches then
+
+        return
+
+    end
 
 
-    if lastHead == nil then
+    previousMatches =
+        signature
+
+
+    console.log(
+        string.format(
+            "Known snake tiles: %d",
+            #matches
+        )
+    )
+
+
+    for i = 1, #matches do
+
+        local match =
+            matches[i]
+
 
         console.log(
             string.format(
-                "HEAD 0x%04X -> row=%d col=%d",
-                address,
-                row,
-                column
-            )
-        )
-
-    else
-
-        local delta =
-            address - lastHead
-
-
-        console.log(
-            string.format(
-                "HEAD 0x%04X -> 0x%04X | delta %+d / 0x%X | row=%d col=%d",
-                lastHead,
-                address,
-                delta,
-                math.abs(delta),
-                row,
-                column
+                "  0x%04X = %02X -> col=%d row=%d",
+                match.address,
+                match.value,
+                match.column,
+                match.row
             )
         )
 
     end
 
 
-    lastHead = address
+    console.log("--------------------------------")
 
 end
 
@@ -277,32 +332,11 @@ end
 
 console.clear()
 
-console.log("Snake grid visualizer")
+console.log("Snake tile visualizer")
 console.log("--------------------------------")
-
-console.log(
-    string.format(
-        "Y stride: 0x%X",
-        ROW_STRIDE
-    )
-)
-
-console.log(
-    string.format(
-        "X stride: 0x%X",
-        COLUMN_STRIDE
-    )
-)
-
-console.log(
-    string.format(
-        "Reference: 0x%04X = row %d col %d",
-        REFERENCE_ADDRESS,
-        REFERENCE_ROW,
-        REFERENCE_COLUMN
-    )
-)
-
+console.log("Y stride hypothesis: 0x80")
+console.log("X stride hypothesis: 0x04")
+console.log("Scanning individual known sprite values")
 console.log("--------------------------------")
 
 
@@ -313,28 +347,20 @@ console.log("--------------------------------")
 while true do
 
     -- ========================================================
-    -- FIND SNAKE
+    -- SCAN MEMORY
     -- ========================================================
 
-    local headAddress =
-        findHorizontalSnake()
+    local matches =
+        findSnakeTiles()
 
 
-    -- ========================================================
-    -- LOG ONLY WHEN SOMETHING CHANGES
-    -- ========================================================
-
-    if headAddress ~= nil then
-
-        logHead(
-            headAddress
-        )
-
-    end
+    logMatches(
+        matches
+    )
 
 
     -- ========================================================
-    -- PANEL COORDINATES
+    -- VISUALIZATION POSITION
     -- ========================================================
 
     local panelX =
@@ -349,7 +375,7 @@ while true do
 
 
     -- ========================================================
-    -- PANEL BACKGROUND
+    -- BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
@@ -363,7 +389,7 @@ while true do
 
 
     -- ========================================================
-    -- DRAW EMPTY GRID
+    -- EMPTY GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
@@ -394,60 +420,33 @@ while true do
 
 
     -- ========================================================
-    -- DRAW DETECTED SNAKE
+    -- DRAW ALL KNOWN SNAKE TILES
     -- ========================================================
 
-    if headAddress ~= nil then
+    for i = 1, #matches do
 
-        local snakeRow, snakeColumn =
-            addressToGrid(
-                headAddress
-            )
+        local match =
+            matches[i]
 
 
-        -- Only draw if our calculated coordinates are sensible.
-        if
-            snakeRow >= 0 and
-            snakeRow < GRID_HEIGHT and
-            snakeColumn >= 0 and
-            snakeColumn < GRID_WIDTH
-        then
-
-            for segment = 0, SNAKE_LENGTH - 1 do
-
-                local column =
-                    snakeColumn +
-                    segment
+        local x =
+            gridX +
+            match.column * CELL_PIXELS
 
 
-                if
-                    column >= 0 and
-                    column < GRID_WIDTH
-                then
-
-                    local x =
-                        gridX +
-                        column * CELL_PIXELS
-
-                    local y =
-                        gridY +
-                        snakeRow * CELL_PIXELS
+        local y =
+            gridY +
+            match.row * CELL_PIXELS
 
 
-                    gui.drawRectangle(
-                        x,
-                        y,
-                        CELL_PIXELS - 1,
-                        CELL_PIXELS - 1,
-                        0xFFFFFFFF,
-                        0xFF00FF40
-                    )
-
-                end
-
-            end
-
-        end
+        gui.drawRectangle(
+            x,
+            y,
+            CELL_PIXELS - 1,
+            CELL_PIXELS - 1,
+            0xFFFFFFFF,
+            0xFF00FF40
+        )
 
     end
 
