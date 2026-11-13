@@ -1,31 +1,28 @@
 -- BizHawk Lua
--- First Snake Visualizer / Unknown Sprite Finder
+-- First Snake Local Memory Diagnostic
 --
--- CONFIRMED FOR CURRENT FRAME:
+-- Known current snake section:
 --
 --   0x0FA0 = 28 08
 --   0x0FA2 = 25 08
 --   0x0FA4 = 2A 08
 --
--- These are three pieces of the visible bent snake.
+-- The visible snake has additional vertical segments.
+--
+-- Goal:
+--   Find those segments WITHOUT making another grid-layout
+--   assumption.
 --
 -- DISPLAY:
---
---   Black  = empty / background
---   Green  = confirmed snake sprite
---   Yellow = unknown non-empty tile with attribute 08
+--   Existing 12x26 visualization
+--   Green = confirmed snake IDs
+--   Black = everything else
 --
 -- CONSOLE:
+--   Dumps interesting XX 08 pairs in the local memory region.
 --
---   Logs unknown candidate tiles near the snake.
---
--- Current confirmed first-snake IDs:
---
---   23
---   25
---   28
---   2A
---   2D
+-- Confirmed IDs:
+--   23 25 28 2A 2D
 
 local DOMAIN = "WRAM"
 
@@ -42,33 +39,31 @@ local PANEL_MARGIN = 8
 
 
 -- ============================================================
--- MEMORY STRUCTURE
+-- CURRENT VISUALIZATION MAPPING
 -- ============================================================
+
+local GRID_BASE = 0x049E
 
 local CELL_SIZE  = 2
 local ROW_STRIDE = 0x80
 
 
 -- ============================================================
--- CURRENT GRID BASE
+-- LOCAL MEMORY SEARCH
 --
--- Keep this unchanged for this diagnostic.
+-- This deliberately ignores the assumed grid mapping.
 -- ============================================================
 
-local GRID_BASE = 0x049E
+local SEARCH_START = 0x0E80
+local SEARCH_END   = 0x0FFF
 
 
 -- ============================================================
--- TILE FORMAT
+-- TILE DATA
 -- ============================================================
 
-local EMPTY_TILE = 0x01
 local TILE_ATTRIBUTE = 0x08
 
-
--- ============================================================
--- CONFIRMED FIRST-SNAKE IDS
--- ============================================================
 
 local SNAKE_TILES = {
 
@@ -85,14 +80,10 @@ local SNAKE_TILES = {
 }
 
 
--- ============================================================
--- IGNORE KNOWN BOARD GRAPHICS
---
--- These are structural/background pieces we've already seen
--- in the dump and do not want highlighted as candidates.
--- ============================================================
-
+-- Board/background tiles we already recognize.
 local IGNORE_TILES = {
+
+    [0x00] = true,
 
     [0x01] = true,
 
@@ -141,7 +132,7 @@ client.SetGameExtraPadding(
 -- STATE
 -- ============================================================
 
-local previousUnknownSignature = ""
+local previousSignature = ""
 
 
 -- ============================================================
@@ -158,7 +149,7 @@ local function readByte(address)
 end
 
 
-local function getCellAddress(row, column)
+local function getGridAddress(row, column)
 
     return
         GRID_BASE +
@@ -168,171 +159,146 @@ local function getCellAddress(row, column)
 end
 
 
-local function readCell(row, column)
-
-    local address =
-        getCellAddress(
-            row,
-            column
-        )
-
-
-    local tile =
-        readByte(address)
-
-
-    local attribute =
-        readByte(address + 1)
-
-
-    return tile, attribute, address
-
-end
-
-
 -- ============================================================
--- CLASSIFICATION
+-- LOCAL MEMORY SCAN
+--
+-- Scan every two bytes for:
+--
+--     XX 08
+--
+-- Ignore known empty/border values.
 -- ============================================================
 
-local function isConfirmedSnake(tile, attribute)
+local function scanLocalMemory()
 
-    return
-        attribute == TILE_ATTRIBUTE and
-        SNAKE_TILES[tile] == true
-
-end
+    local results = {}
 
 
-local function isUnknownCandidate(tile, attribute)
+    for address = SEARCH_START, SEARCH_END, 2 do
 
-    if attribute ~= TILE_ATTRIBUTE then
-        return false
-    end
-
-
-    if SNAKE_TILES[tile] then
-        return false
-    end
+        local tile =
+            readByte(address)
 
 
-    if IGNORE_TILES[tile] then
-        return false
-    end
+        local attribute =
+            readByte(address + 1)
 
 
-    return true
+        if
+            attribute == TILE_ATTRIBUTE and
+            not IGNORE_TILES[tile]
+        then
 
-end
+            results[#results + 1] = {
 
+                address = address,
 
--- ============================================================
--- BUILD UNKNOWN LIST
--- ============================================================
+                tile = tile,
 
-local function findUnknownCandidates()
+                confirmed =
+                    SNAKE_TILES[tile] == true
 
-    local candidates = {}
-
-
-    for row = 0, GRID_HEIGHT - 1 do
-
-        for column = 0, GRID_WIDTH - 1 do
-
-            local tile, attribute, address =
-                readCell(
-                    row,
-                    column
-                )
-
-
-            if isUnknownCandidate(tile, attribute) then
-
-                candidates[#candidates + 1] = {
-
-                    row = row,
-
-                    column = column,
-
-                    tile = tile,
-
-                    address = address
-
-                }
-
-            end
+            }
 
         end
 
     end
 
 
-    return candidates
+    return results
 
 end
 
 
 -- ============================================================
--- LOG UNKNOWN CANDIDATES
+-- SIGNATURE
 -- ============================================================
 
-local function logUnknownCandidates(candidates)
+local function buildSignature(results)
 
     local parts = {}
 
 
-    for i = 1, #candidates do
+    for i = 1, #results do
 
-        local candidate =
-            candidates[i]
+        local result =
+            results[i]
 
 
         parts[#parts + 1] =
             string.format(
                 "%04X:%02X",
-                candidate.address,
-                candidate.tile
+                result.address,
+                result.tile
             )
 
     end
 
 
+    return table.concat(
+        parts,
+        "|"
+    )
+
+end
+
+
+-- ============================================================
+-- CONSOLE
+-- ============================================================
+
+local function logResults(results)
+
     local signature =
-        table.concat(
-            parts,
-            "|"
+        buildSignature(
+            results
         )
 
 
-    if signature == previousUnknownSignature then
+    if signature == previousSignature then
         return
     end
 
 
-    previousUnknownSignature =
+    previousSignature =
         signature
 
 
     console.log(
+        "========== LOCAL MEMORY =========="
+    )
+
+
+    console.log(
         string.format(
-            "Unknown candidates: %d",
-            #candidates
+            "Interesting XX 08 pairs: %d",
+            #results
         )
     )
 
 
-    for i = 1, #candidates do
+    for i = 1, #results do
 
-        local candidate =
-            candidates[i]
+        local result =
+            results[i]
+
+
+        local marker = "?"
+
+
+        if result.confirmed then
+
+            marker = "*"
+
+        end
 
 
         console.log(
             string.format(
-                "  row=%02d col=%02d addr=0x%04X tile=%02X",
-                candidate.row,
-                candidate.column,
-                candidate.address,
-                candidate.tile
+                "%s 0x%04X = %02X 08",
+                marker,
+                result.address,
+                result.tile
             )
         )
 
@@ -340,7 +306,17 @@ local function logUnknownCandidates(candidates)
 
 
     console.log(
-        "--------------------------------"
+        "* = confirmed snake ID"
+    )
+
+
+    console.log(
+        "? = unknown candidate"
+    )
+
+
+    console.log(
+        "=================================="
     )
 
 end
@@ -353,42 +329,42 @@ end
 console.clear()
 
 console.log(
-    "First-snake unknown sprite finder"
+    "First-snake local memory diagnostic"
 )
 
 console.log(
-    "Green = confirmed snake"
+    "Scanning 0x0E80-0x0FFF"
 )
 
 console.log(
-    "Yellow = unknown XX 08 candidate"
+    "Known horizontal section:"
 )
 
 console.log(
-    "Confirmed IDs: 23 25 28 2A 2D"
+    "0x0FA0=28, 0x0FA2=25, 0x0FA4=2A"
 )
 
 console.log(
-    "--------------------------------"
+    "----------------------------------"
 )
 
 
 -- ============================================================
--- MAIN LOOP
+-- MAIN
 -- ============================================================
 
 while true do
 
     -- ========================================================
-    -- FIND UNKNOWN CANDIDATES
+    -- RAW LOCAL SCAN
     -- ========================================================
 
-    local unknownCandidates =
-        findUnknownCandidates()
+    local results =
+        scanLocalMemory()
 
 
-    logUnknownCandidates(
-        unknownCandidates
+    logResults(
+        results
     )
 
 
@@ -409,10 +385,7 @@ while true do
         PANEL_MARGIN
 
 
-    -- ========================================================
-    -- BACKGROUND
-    -- ========================================================
-
+    -- Background
     gui.drawRectangle(
         panelX,
         0,
@@ -424,42 +397,39 @@ while true do
 
 
     -- ========================================================
-    -- DRAW CELLS
+    -- DRAW GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
 
         for column = 0, GRID_WIDTH - 1 do
 
-            local tile, attribute, address =
-                readCell(
+            local address =
+                getGridAddress(
                     row,
                     column
                 )
+
+
+            local tile =
+                readByte(address)
+
+
+            local attribute =
+                readByte(address + 1)
 
 
             local color =
                 0xFF000000
 
 
-            -- Confirmed snake
-            if isConfirmedSnake(
-                tile,
-                attribute
-            ) then
+            if
+                attribute == TILE_ATTRIBUTE and
+                SNAKE_TILES[tile]
+            then
 
                 color =
                     0xFF00FF40
-
-
-            -- Unknown candidate
-            elseif isUnknownCandidate(
-                tile,
-                attribute
-            ) then
-
-                color =
-                    0xFFFFFF00
 
             end
 
