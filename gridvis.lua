@@ -1,21 +1,20 @@
 -- BizHawk Lua
 -- Snake memory diagnostic
 --
--- Phase 1:
---   Black = empty / unknown
---   Green = known snake sprite value
+-- Purpose:
+--   Scan the known WRAM range and identify where the
+--   known snake tile values actually occur.
 --
--- Known values:
+-- Known snake values:
 --   2D = right-facing head
 --   25 = horizontal body
 --   23 = tail
 --
--- This diagnostic intentionally does NOT assume
--- that the game board has a 0x40 row stride.
+-- Visualization:
+--   Black = everything else
+--   Green = known snake tile
 --
--- Instead, it displays the raw memory range as
--- consecutive 2-byte tile entries so we can determine
--- the actual relationship between memory and the board.
+-- Additionally prints the addresses of every match.
 
 local DOMAIN = "WRAM"
 
@@ -26,30 +25,13 @@ local DOMAIN = "WRAM"
 local START_ADDR = 0x000A80
 local END_ADDR   = 0x00110E
 
--- From the dump, entries appear to commonly be:
---
---   tile byte
---   attribute byte
---
--- Example:
---
---   2D 08
---   25 08
---   25 08
---   23 ...
---
 local CELL_SIZE = 2
 
 
 -- ============================================================
--- DIAGNOSTIC GRID
+-- RAW MEMORY DISPLAY
 -- ============================================================
 
--- Display 32 memory entries per row.
---
--- NOTE:
--- This is NOT claiming that the game board is 32 wide.
--- This is only a raw visualization of memory.
 local DISPLAY_WIDTH = 32
 
 local ENTRY_COUNT =
@@ -64,7 +46,7 @@ local DISPLAY_HEIGHT =
 
 
 -- ============================================================
--- VISUALIZATION
+-- VISUAL SETTINGS
 -- ============================================================
 
 local CELL_PIXELS = 5
@@ -77,23 +59,18 @@ local PANEL_WIDTH =
 local PANEL_HEIGHT =
     DISPLAY_HEIGHT * CELL_PIXELS
     + PANEL_MARGIN * 2
-    + 20
 
 
 -- ============================================================
--- KNOWN SNAKE VALUES
+-- KNOWN SNAKE TILE VALUES
 -- ============================================================
 
 local SNAKE_TILES = {
 
-    -- Right-facing head
-    [0x2D] = true,
+    [0x2D] = true, -- head
+    [0x25] = true, -- body
+    [0x23] = true  -- tail
 
-    -- Horizontal body
-    [0x25] = true,
-
-    -- Tail
-    [0x23] = true
 }
 
 
@@ -110,30 +87,13 @@ client.SetGameExtraPadding(
 
 
 -- ============================================================
--- HELPER FUNCTIONS
+-- HELPERS
 -- ============================================================
 
-local function isSnakeTile(tile)
+local function isSnakeTile(value)
 
-    return SNAKE_TILES[tile] == true
-end
+    return SNAKE_TILES[value] == true
 
-
-local function readTile(address)
-
-    local tile =
-        memory.read_u8(
-            address,
-            DOMAIN
-        )
-
-    local attribute =
-        memory.read_u8(
-            address + 1,
-            DOMAIN
-        )
-
-    return tile, attribute
 end
 
 
@@ -143,45 +103,48 @@ end
 
 while true do
 
-    -- Keep the positioning method from your working script.
-    local panelX = client.bufferwidth()
+    local panelX =
+        client.bufferwidth()
 
     local gridX =
         panelX + PANEL_MARGIN
 
     local gridY =
-        PANEL_MARGIN + 10
+        18
 
 
     -- ========================================================
-    -- PANEL BACKGROUND
+    -- BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
         panelX,
         0,
         PANEL_WIDTH - 1,
-        PANEL_HEIGHT,
+        client.bufferheight(),
         0xFF404040,
         0xFF101010
     )
 
 
-    -- ========================================================
-    -- TITLE
-    -- ========================================================
-
     gui.pixelText(
         panelX + PANEL_MARGIN,
-        1,
-        "Raw WRAM",
+        2,
+        "RAW WRAM",
         0xFFFFFFFF,
         0xFF101010
     )
 
 
     -- ========================================================
-    -- RAW MEMORY VISUALIZATION
+    -- MATCH LIST
+    -- ========================================================
+
+    local matches = {}
+
+
+    -- ========================================================
+    -- SCAN MEMORY
     -- ========================================================
 
     for index = 0, ENTRY_COUNT - 1 do
@@ -190,20 +153,28 @@ while true do
             START_ADDR
             + index * CELL_SIZE
 
-        local tile, attribute =
-            readTile(address)
+
+        local value =
+            memory.read_u8(
+                address,
+                DOMAIN
+            )
+
 
         local column =
             index % DISPLAY_WIDTH
+
 
         local row =
             math.floor(
                 index / DISPLAY_WIDTH
             )
 
+
         local x =
             gridX
             + column * CELL_PIXELS
+
 
         local y =
             gridY
@@ -214,10 +185,17 @@ while true do
             0xFF000000
 
 
-        if isSnakeTile(tile) then
+        if isSnakeTile(value) then
 
             fillColor =
                 0xFF00FF40
+
+
+            -- Save matched address/value
+            matches[#matches + 1] = {
+                address = address,
+                value = value
+            }
 
         end
 
@@ -230,63 +208,116 @@ while true do
             0xFF303030,
             fillColor
         )
+
     end
 
 
     -- ========================================================
-    -- DEBUG 0x1100 REGION
-    --
-    -- Read addresses:
-    --
-    -- 1100
-    -- 1102
-    -- 1104
-    -- 1106
-    -- 1108
-    -- 110A
-    -- 110C
-    -- 110E
-    -- 1110
-    -- 1112
-    -- 1114
-    -- 1116
-    -- 1118
-    --
-    -- If the raw dump and Lua address space match, we expect
-    -- something resembling:
-    --
-    -- F4 01 01 01 01 01 01 2D 25 25 25 25 23
-    --
+    -- DISPLAY MATCHED ADDRESSES
     -- ========================================================
 
-    local debug = ""
+    local textX =
+        panelX + 1
 
-    for address = 0x1100, 0x1118, 2 do
-
-        local value =
-            memory.read_u8(
-                address,
-                DOMAIN
-            )
-
-        debug =
-            debug
-            .. string.format(
-                "%02X ",
-                value
-            )
-    end
+    local textY =
+        gridY
+        + DISPLAY_HEIGHT * CELL_PIXELS
+        + 4
 
 
-    -- Put debug values at bottom of the visible panel.
     gui.pixelText(
-        panelX + 1,
-        client.bufferheight() - 10,
-        debug,
+        textX,
+        textY,
+        "MATCHES:",
+        0xFFFFFFFF,
+        0xFF000000
+    )
+
+
+    textY =
+        textY + 9
+
+
+    -- Break the output across several lines so it fits.
+    local line = ""
+    local itemsOnLine = 0
+
+
+    for i = 1, #matches do
+
+        local entry =
+            matches[i]
+
+
+        local item =
+            string.format(
+                "%04X=%02X ",
+                entry.address,
+                entry.value
+            )
+
+
+        line =
+            line .. item
+
+
+        itemsOnLine =
+            itemsOnLine + 1
+
+
+        if itemsOnLine >= 3 then
+
+            gui.pixelText(
+                textX,
+                textY,
+                line,
+                0xFFFFFFFF,
+                0xFF000000
+            )
+
+
+            textY =
+                textY + 9
+
+
+            line = ""
+            itemsOnLine = 0
+
+        end
+
+    end
+
+
+    -- Print remaining items
+    if line ~= "" then
+
+        gui.pixelText(
+            textX,
+            textY,
+            line,
+            0xFFFFFFFF,
+            0xFF000000
+        )
+
+    end
+
+
+    -- ========================================================
+    -- MATCH COUNT
+    -- ========================================================
+
+    gui.pixelText(
+        textX,
+        textY + 12,
+        string.format(
+            "Count: %d",
+            #matches
+        ),
         0xFFFFFFFF,
         0xFF000000
     )
 
 
     emu.frameadvance()
+
 end
