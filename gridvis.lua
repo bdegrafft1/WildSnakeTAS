@@ -1,38 +1,39 @@
 -- BizHawk Lua
 -- 12x26 Snake Grid Visualizer
 --
--- CURRENT MAPPING FROM OBSERVATIONS:
---
---   Y + 1 grid cell = +0x80
---   X + 1 grid cell = +0x04
---
--- Examples:
---
---   0x0CA8 -> 0x0D28 = +0x80
---       down 1
---
---   0x0C24 -> 0x0CA8 = +0x84
---       down 1 + right 1
---
--- CONFIRMED HORIZONTAL SNAKE SIGNATURE:
---
---   2D ?? 25 ?? 25 ?? 25 ?? 25 ?? 23
---
 -- DISPLAY:
 --   Black = empty
---   Green = detected snake
+--   Green = detected horizontal snake
 --
--- DEBUG:
---   Console only
+-- CONSOLE:
+--   Head address
+--   Address delta
+--   Calculated row/column
+--
+-- CURRENT OBSERVATIONS:
+--
+-- Normal downward movement:
+--   +0x80
+--
+-- Example:
+--   0x0CA8 -> 0x0D28 = +0x80
+--   0x0D28 -> 0x0DA8 = +0x80
+--
+-- Observed combined movement:
+--   0x0C24 -> 0x0CA8 = +0x84
+--
+-- Working hypothesis:
+--   Y step = 0x80
+--   X step = 0x04
 
 local DOMAIN = "WRAM"
 
 
 -- ============================================================
--- GRID
+-- GRID SETTINGS
 -- ============================================================
 
-local GRID_WIDTH  = 12
+local GRID_WIDTH = 12
 local GRID_HEIGHT = 26
 
 local CELL_PIXELS = 8
@@ -44,47 +45,31 @@ local PANEL_MARGIN = 8
 -- ============================================================
 
 local ROW_STRIDE = 0x80
-
 local COLUMN_STRIDE = 0x04
 
-
--- ============================================================
--- SEARCH RANGE
--- ============================================================
-
 local START_ADDR = 0x0A00
-local END_ADDR   = 0x1150
+local END_ADDR = 0x1150
 
 
 -- ============================================================
 -- REFERENCE POSITION
 --
--- We observed:
+-- 0x0C24 was observed during the falling sequence.
 --
---   0x0C24
+-- Current provisional mapping:
+--   0x0C24 = row 15, column 3
 --
--- at the position shown in the first screenshot.
---
--- From the rendered grid / game image, use this as our
--- temporary coordinate anchor.
---
--- The vertical position was already calculated as row 15.
---
--- Visually, the snake head is approximately column 3.
---
--- If X is off by exactly one square, only REFERENCE_COLUMN
--- needs changing.
+-- We can adjust REFERENCE_COLUMN later without changing
+-- the underlying X/Y stride logic.
 -- ============================================================
 
 local REFERENCE_ADDRESS = 0x0C24
-
 local REFERENCE_ROW = 15
-
 local REFERENCE_COLUMN = 3
 
 
 -- ============================================================
--- SNAKE SHAPE
+-- SNAKE
 -- ============================================================
 
 local SNAKE_LENGTH = 6
@@ -95,12 +80,12 @@ local SNAKE_LENGTH = 6
 -- ============================================================
 
 local PANEL_WIDTH =
-    GRID_WIDTH * CELL_PIXELS
-    + PANEL_MARGIN * 2
+    GRID_WIDTH * CELL_PIXELS +
+    PANEL_MARGIN * 2
 
 local PANEL_HEIGHT =
-    GRID_HEIGHT * CELL_PIXELS
-    + PANEL_MARGIN * 2
+    GRID_HEIGHT * CELL_PIXELS +
+    PANEL_MARGIN * 2
 
 
 client.SetGameExtraPadding(
@@ -119,7 +104,7 @@ local lastHead = nil
 
 
 -- ============================================================
--- MEMORY HELPERS
+-- MEMORY HELPER
 -- ============================================================
 
 local function readByte(address)
@@ -134,6 +119,11 @@ end
 
 -- ============================================================
 -- FIND HORIZONTAL SNAKE
+--
+-- Searches for:
+--
+--   2D ?? 25 ?? 25 ?? 25 ?? 25 ?? 23
+--
 -- ============================================================
 
 local function findHorizontalSnake()
@@ -141,11 +131,11 @@ local function findHorizontalSnake()
     for address = START_ADDR, END_ADDR - 10, 2 do
 
         if
-            readByte(address)      == 0x2D and
-            readByte(address + 2)  == 0x25 and
-            readByte(address + 4)  == 0x25 and
-            readByte(address + 6)  == 0x25 and
-            readByte(address + 8)  == 0x25 and
+            readByte(address) == 0x2D and
+            readByte(address + 2) == 0x25 and
+            readByte(address + 4) == 0x25 and
+            readByte(address + 6) == 0x25 and
+            readByte(address + 8) == 0x25 and
             readByte(address + 10) == 0x23
         then
 
@@ -161,12 +151,7 @@ end
 
 
 -- ============================================================
--- CONVERT ADDRESS DELTA -> GRID MOVEMENT
---
--- delta = rows * 0x80 + columns * 0x04
---
--- We use the closest row component, then whatever remains
--- becomes horizontal movement.
+-- ADDRESS -> GRID
 -- ============================================================
 
 local function addressToGrid(address)
@@ -175,45 +160,52 @@ local function addressToGrid(address)
         address - REFERENCE_ADDRESS
 
 
-    -- Determine vertical movement.
+    -- --------------------------------------------------------
+    -- Estimate vertical movement.
+    --
+    -- Using floor here handles positive falling addresses.
+    -- --------------------------------------------------------
+
     local rowDelta
 
     if delta >= 0 then
 
         rowDelta =
-            math.floor(
-                delta / ROW_STRIDE
-            )
+            math.floor(delta / ROW_STRIDE)
 
     else
 
         rowDelta =
-            math.ceil(
-                delta / ROW_STRIDE
-            )
+            math.ceil(delta / ROW_STRIDE)
 
     end
 
 
+    -- --------------------------------------------------------
     -- Remove vertical portion.
-    local remainder =
-        delta
-        - rowDelta * ROW_STRIDE
+    -- --------------------------------------------------------
+
+    local horizontalBytes =
+        delta -
+        rowDelta * ROW_STRIDE
 
 
+    -- --------------------------------------------------------
     -- Remaining bytes represent horizontal movement.
+    -- --------------------------------------------------------
+
     local columnDelta =
-        remainder / COLUMN_STRIDE
+        horizontalBytes / COLUMN_STRIDE
 
 
     local row =
-        REFERENCE_ROW
-        + rowDelta
+        REFERENCE_ROW +
+        rowDelta
 
 
     local column =
-        REFERENCE_COLUMN
-        + columnDelta
+        REFERENCE_COLUMN +
+        columnDelta
 
 
     return row, column
@@ -223,6 +215,8 @@ end
 
 -- ============================================================
 -- CONSOLE LOGGING
+--
+-- Only logs when address changes.
 -- ============================================================
 
 local function logHead(address)
@@ -230,7 +224,6 @@ local function logHead(address)
     if address == nil then
         return
     end
-
 
     if address == lastHead then
         return
@@ -245,10 +238,10 @@ local function logHead(address)
 
         console.log(
             string.format(
-                "HEAD 0x%04X -> grid (%d,%d)",
+                "HEAD 0x%04X -> row=%d col=%d",
                 address,
-                column,
-                row
+                row,
+                column
             )
         )
 
@@ -260,21 +253,20 @@ local function logHead(address)
 
         console.log(
             string.format(
-                "HEAD 0x%04X -> 0x%04X | delta %+d / 0x%X -> grid (%d,%d)",
+                "HEAD 0x%04X -> 0x%04X | delta %+d / 0x%X | row=%d col=%d",
                 lastHead,
                 address,
                 delta,
                 math.abs(delta),
-                column,
-                row
+                row,
+                column
             )
         )
 
     end
 
 
-    lastHead =
-        address
+    lastHead = address
 
 end
 
@@ -289,19 +281,25 @@ console.log("Snake grid visualizer")
 console.log("--------------------------------")
 
 console.log(
-    "Y stride: 0x80"
-)
-
-console.log(
-    "X stride: 0x04"
+    string.format(
+        "Y stride: 0x%X",
+        ROW_STRIDE
+    )
 )
 
 console.log(
     string.format(
-        "Reference: 0x%04X -> (%d,%d)",
+        "X stride: 0x%X",
+        COLUMN_STRIDE
+    )
+)
+
+console.log(
+    string.format(
+        "Reference: 0x%04X = row %d col %d",
         REFERENCE_ADDRESS,
-        REFERENCE_COLUMN,
-        REFERENCE_ROW
+        REFERENCE_ROW,
+        REFERENCE_COLUMN
     )
 )
 
@@ -315,12 +313,16 @@ console.log("--------------------------------")
 while true do
 
     -- ========================================================
-    -- DETECT
+    -- FIND SNAKE
     -- ========================================================
 
     local headAddress =
         findHorizontalSnake()
 
+
+    -- ========================================================
+    -- LOG ONLY WHEN SOMETHING CHANGES
+    -- ========================================================
 
     if headAddress ~= nil then
 
@@ -332,21 +334,22 @@ while true do
 
 
     -- ========================================================
-    -- PANEL
+    -- PANEL COORDINATES
     -- ========================================================
 
     local panelX =
         client.bufferwidth()
 
     local gridX =
-        panelX + PANEL_MARGIN
+        panelX +
+        PANEL_MARGIN
 
     local gridY =
         PANEL_MARGIN
 
 
     -- ========================================================
-    -- BACKGROUND
+    -- PANEL BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
@@ -360,7 +363,7 @@ while true do
 
 
     -- ========================================================
-    -- EMPTY GRID
+    -- DRAW EMPTY GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
@@ -368,12 +371,12 @@ while true do
         for column = 0, GRID_WIDTH - 1 do
 
             local x =
-                gridX
-                + column * CELL_PIXELS
+                gridX +
+                column * CELL_PIXELS
 
             local y =
-                gridY
-                + row * CELL_PIXELS
+                gridY +
+                row * CELL_PIXELS
 
 
             gui.drawRectangle(
@@ -391,7 +394,7 @@ while true do
 
 
     -- ========================================================
-    -- DRAW CURRENT SNAKE
+    -- DRAW DETECTED SNAKE
     -- ========================================================
 
     if headAddress ~= nil then
@@ -402,7 +405,7 @@ while true do
             )
 
 
-        -- Only draw valid integer coordinates.
+        -- Only draw if our calculated coordinates are sensible.
         if
             snakeRow >= 0 and
             snakeRow < GRID_HEIGHT and
@@ -413,8 +416,8 @@ while true do
             for segment = 0, SNAKE_LENGTH - 1 do
 
                 local column =
-                    snakeColumn
-                    + segment
+                    snakeColumn +
+                    segment
 
 
                 if
@@ -423,12 +426,12 @@ while true do
                 then
 
                     local x =
-                        gridX
-                        + column * CELL_PIXELS
+                        gridX +
+                        column * CELL_PIXELS
 
                     local y =
-                        gridY
-                        + snakeRow * CELL_PIXELS
+                        gridY +
+                        snakeRow * CELL_PIXELS
 
 
                     gui.drawRectangle(
@@ -448,6 +451,10 @@ while true do
 
     end
 
+
+    -- ========================================================
+    -- NEXT FRAME
+    -- ========================================================
 
     emu.frameadvance()
 
