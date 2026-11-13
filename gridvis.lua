@@ -1,60 +1,56 @@
 -- BizHawk Lua
--- Snake memory diagnostic
+-- 12x26 Snake Grid Visualizer
 --
--- Goal:
--- Find the actual memory locations being used for the snake.
+-- Phase 1
 --
--- Black = everything else
--- Green = known snake sprite values
+-- Black = empty / unknown
+-- Green = known snake sprite
 --
--- Known snake values:
---   2D = head facing right
---   25 = horizontal body
---   23 = tail
+-- Confirmed from live memory:
+--
+--   10E8 = 2D   head
+--   10EA = 25   body
+--   10EC = 25   body
+--   10EE = 25   body
+--   10F0 = 25   body
+--   10F2 = 23   tail
+--
+-- The visible snake occupies the final 6 cells
+-- of the bottom row.
 
 local DOMAIN = "WRAM"
 
--- ============================================================
--- MEMORY RANGE
--- ============================================================
-
-local START_ADDR = 0x000A80
-local END_ADDR   = 0x00110E
-
-local CELL_SIZE = 2
-
 
 -- ============================================================
--- RAW MEMORY GRID
+-- GRID
 -- ============================================================
 
-local DISPLAY_WIDTH = 32
+local GRID_WIDTH  = 12
+local GRID_HEIGHT = 26
 
-local ENTRY_COUNT =
-    math.floor(
-        (END_ADDR - START_ADDR) / CELL_SIZE
-    ) + 1
-
-local DISPLAY_HEIGHT =
-    math.ceil(
-        ENTRY_COUNT / DISPLAY_WIDTH
-    )
+local CELL_SIZE  = 2
+local ROW_STRIDE = 0x40
 
 
 -- ============================================================
--- DISPLAY SETTINGS
+-- MEMORY MAPPING
 -- ============================================================
 
-local CELL_PIXELS = 7
-local PANEL_MARGIN = 6
+-- Confirmed snake head.
+local SNAKE_HEAD_ADDRESS = 0x10E8
 
-local PANEL_WIDTH =
-    DISPLAY_WIDTH * CELL_PIXELS
-    + PANEL_MARGIN * 2
+-- Snake visually begins at column 6.
+local SNAKE_HEAD_COLUMN = 6
 
-local PANEL_HEIGHT =
-    DISPLAY_HEIGHT * CELL_PIXELS
-    + 80
+-- Calculate the beginning of the bottom row.
+local LAST_ROW_BASE =
+    SNAKE_HEAD_ADDRESS
+    - (SNAKE_HEAD_COLUMN * CELL_SIZE)
+
+-- Calculate the beginning of row zero.
+local GRID_BASE =
+    LAST_ROW_BASE
+    - ((GRID_HEIGHT - 1) * ROW_STRIDE)
 
 
 -- ============================================================
@@ -62,14 +58,34 @@ local PANEL_HEIGHT =
 -- ============================================================
 
 local SNAKE_TILES = {
-    [0x2D] = true,
-    [0x25] = true,
-    [0x23] = true
+
+    [0x2D] = true, -- right-facing head
+
+    [0x25] = true, -- horizontal body
+
+    [0x23] = true  -- tail
 }
 
 
 -- ============================================================
--- BORDER / EXTRA SPACE
+-- VISUAL SETTINGS
+-- ============================================================
+
+local CELL_PIXELS = 8
+local PANEL_MARGIN = 8
+
+local PANEL_WIDTH =
+    GRID_WIDTH * CELL_PIXELS
+    + PANEL_MARGIN * 2
+
+local PANEL_HEIGHT =
+    GRID_HEIGHT * CELL_PIXELS
+    + PANEL_MARGIN * 2
+    + 18
+
+
+-- ============================================================
+-- EXTRA SCREEN SPACE
 -- ============================================================
 
 client.SetGameExtraPadding(
@@ -81,25 +97,62 @@ client.SetGameExtraPadding(
 
 
 -- ============================================================
--- FUNCTIONS
+-- MEMORY FUNCTIONS
 -- ============================================================
 
-local function isSnakeTile(value)
+local function getCellAddress(row, column)
 
-    return SNAKE_TILES[value] == true
+    return GRID_BASE
+        + row * ROW_STRIDE
+        + column * CELL_SIZE
+
+end
+
+
+local function readCell(row, column)
+
+    local address =
+        getCellAddress(
+            row,
+            column
+        )
+
+    local tile =
+        memory.read_u8(
+            address,
+            DOMAIN
+        )
+
+    local attribute =
+        memory.read_u8(
+            address + 1,
+            DOMAIN
+        )
+
+    return tile, attribute, address
+
+end
+
+
+local function isSnakeTile(tile)
+
+    return SNAKE_TILES[tile] == true
+
 end
 
 
 -- ============================================================
--- MAIN
+-- MAIN LOOP
 -- ============================================================
 
 while true do
 
+    -- Your working right-side panel location.
     local panelX =
         client.bufferwidth()
 
-    local panelY = 0
+    local panelY =
+        PANEL_MARGIN - 16
 
 
     -- ========================================================
@@ -108,226 +161,79 @@ while true do
 
     gui.drawRectangle(
         panelX,
-        panelY,
+        0,
         PANEL_WIDTH - 1,
-        client.bufferheight(),
+        PANEL_HEIGHT,
         0xFF404040,
         0xFF101010
     )
 
 
     -- ========================================================
-    -- SCAN FOR MATCHES FIRST
-    -- ========================================================
-
-    local matches = {}
-
-    for index = 0, ENTRY_COUNT - 1 do
-
-        local address =
-            START_ADDR
-            + index * CELL_SIZE
-
-        local value =
-            memory.read_u8(
-                address,
-                DOMAIN
-            )
-
-        if isSnakeTile(value) then
-
-            matches[#matches + 1] = {
-                address = address,
-                value = value,
-                index = index
-            }
-
-        end
-
-    end
-
-
-    -- ========================================================
-    -- HEADER
+    -- GRID TITLE
     -- ========================================================
 
     gui.pixelText(
         panelX + PANEL_MARGIN,
-        2,
-        string.format(
-            "Snake matches: %d",
-            #matches
-        ),
+        panelY,
+        "Snake grid 12x26",
         0xFFFFFFFF,
         0xFF101010
     )
 
 
-    -- ========================================================
-    -- PRINT MATCHED ADDRESSES
-    --
-    -- This is intentionally at the TOP now.
-    -- ========================================================
-
-    local textX =
-        panelX + PANEL_MARGIN
-
-    local textY = 12
-
-    local line = ""
-
-    for i = 1, #matches do
-
-        local match =
-            matches[i]
-
-        line =
-            line ..
-            string.format(
-                "%04X=%02X ",
-                match.address,
-                match.value
-            )
-
-        -- Four entries per line
-        if i % 4 == 0 then
-
-            gui.pixelText(
-                textX,
-                textY,
-                line,
-                0xFFFFFFFF,
-                0xFF101010
-            )
-
-            textY =
-                textY + 9
-
-            line = ""
-
-        end
-
-    end
-
-
-    -- Output remaining entries
-    if line ~= "" then
-
-        gui.pixelText(
-            textX,
-            textY,
-            line,
-            0xFFFFFFFF,
-            0xFF101010
-        )
-
-        textY =
-            textY + 9
-    end
-
-
-    -- ========================================================
-    -- RAW MEMORY GRID
-    -- ========================================================
-
     local gridX =
         panelX + PANEL_MARGIN
 
     local gridY =
-        textY + 5
-
-
-    for index = 0, ENTRY_COUNT - 1 do
-
-        local address =
-            START_ADDR
-            + index * CELL_SIZE
-
-
-        local value =
-            memory.read_u8(
-                address,
-                DOMAIN
-            )
-
-
-        local column =
-            index % DISPLAY_WIDTH
-
-
-        local row =
-            math.floor(
-                index / DISPLAY_WIDTH
-            )
-
-
-        local x =
-            gridX
-            + column * CELL_PIXELS
-
-
-        local y =
-            gridY
-            + row * CELL_PIXELS
-
-
-        local fillColor =
-            0xFF000000
-
-
-        if isSnakeTile(value) then
-
-            fillColor =
-                0xFF00FF40
-
-        end
-
-
-        gui.drawRectangle(
-            x,
-            y,
-            CELL_PIXELS - 1,
-            CELL_PIXELS - 1,
-            0xFF303030,
-            fillColor
-        )
-
-    end
+        panelY + 14
 
 
     -- ========================================================
-    -- FIND CONSECUTIVE SNAKE SEQUENCES
-    --
-    -- We're specifically interested in:
-    --
-    -- 2D 25 25 25 25 23
-    --
-    -- with each tile 2 bytes apart.
+    -- DRAW GRID
     -- ========================================================
 
-    local sequenceAddress = nil
+    for row = 0, GRID_HEIGHT - 1 do
 
-    for address = START_ADDR, END_ADDR - 10, 2 do
+        for column = 0, GRID_WIDTH - 1 do
 
-        local v1 = memory.read_u8(address, DOMAIN)
-        local v2 = memory.read_u8(address + 2, DOMAIN)
-        local v3 = memory.read_u8(address + 4, DOMAIN)
-        local v4 = memory.read_u8(address + 6, DOMAIN)
-        local v5 = memory.read_u8(address + 8, DOMAIN)
-        local v6 = memory.read_u8(address + 10, DOMAIN)
+            local tile, attribute, address =
+                readCell(
+                    row,
+                    column
+                )
 
 
-        if
-            v1 == 0x2D and
-            v2 == 0x25 and
-            v3 == 0x25 and
-            v4 == 0x25 and
-            v5 == 0x25 and
-            v6 == 0x23
-        then
+            local x =
+                gridX
+                + column * CELL_PIXELS
 
-            sequenceAddress = address
-            break
+
+            local y =
+                gridY
+                + row * CELL_PIXELS
+
+
+            local fillColor =
+                0xFF000000
+
+
+            if isSnakeTile(tile) then
+
+                fillColor =
+                    0xFF00C840
+
+            end
+
+
+            gui.drawRectangle(
+                x,
+                y,
+                CELL_PIXELS - 1,
+                CELL_PIXELS - 1,
+                0xFF303030,
+                fillColor
+            )
 
         end
 
@@ -335,35 +241,34 @@ while true do
 
 
     -- ========================================================
-    -- DISPLAY EXACT SEQUENCE RESULT
+    -- DEBUG: LAST ROW
     -- ========================================================
 
-    if sequenceAddress ~= nil then
+    local debug = ""
 
-        gui.pixelText(
-            panelX + PANEL_MARGIN,
-            client.bufferheight() - 20,
-            string.format(
-                "SNAKE FOUND @ %04X",
-                sequenceAddress
-            ),
-            0xFF00FF40,
-            0xFF000000
-        )
+    for column = 0, GRID_WIDTH - 1 do
 
-    else
+        local tile, attribute, address =
+            readCell(
+                GRID_HEIGHT - 1,
+                column
+            )
 
-        gui.pixelText(
-            panelX + PANEL_MARGIN,
-            client.bufferheight() - 20,
-            "Snake sequence not found",
-            0xFFFF4040,
-            0xFF000000
-        )
+
+        debug =
+            debug
+            .. string.format(
+                "%02X ",
+                tile
+            )
 
     end
 
 
-    emu.frameadvance()
-
-end
+    gui.pixelText(
+        panelX + 1,
+        gridY
+            + GRID_HEIGHT * CELL_PIXELS
+            + 3,
+        debug,
+        
