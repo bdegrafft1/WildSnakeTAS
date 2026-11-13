@@ -1,29 +1,37 @@
 -- BizHawk Lua
--- 12x26 Snake Grid Diagnostic
---
--- Goal:
---   Identify ALL sprite/tile values used by the first snake.
---
--- Current evidence:
---
---   Vertical grid step   = 0x80
---   Horizontal grid step = 0x04
---
--- Known first-snake values:
---
---   0x25 = known body
---   0x2D = known head/orientation
---   0x23 = known tail/orientation
+-- 12x26 First-Snake Grid Visualizer
 --
 -- DISPLAY:
---   Black = unknown / empty
---   Green = currently known snake value
+--   Black = empty / background / unknown
+--   Green = likely first-snake tile
 --
 -- CONSOLE:
---   Dumps logical grid cells whose values are not obvious
---   empty/background values.
+--   Logs changes to detected snake tiles only
 --
--- No debug text is drawn over the game/grid.
+-- Confirmed memory structure:
+--
+--   One tile = 2 bytes:
+--
+--       byte 0 = tile / sprite ID
+--       byte 1 = attribute
+--
+--   Horizontal stride = 0x02
+--   Vertical stride   = 0x80
+--
+-- Examples from captured bent snake:
+--
+--   28 08
+--   25 08
+--   24 08
+--
+-- Previously captured horizontal snake:
+--
+--   2D 08
+--   25 08
+--   25 08
+--   25 08
+--   25 08
+--   23 08
 
 local DOMAIN = "WRAM"
 
@@ -43,48 +51,53 @@ local PANEL_MARGIN = 8
 -- MEMORY GEOMETRY
 -- ============================================================
 
-local ROW_STRIDE = 0x80
-local COLUMN_STRIDE = 0x04
+local COLUMN_STRIDE = 0x02
+local ROW_STRIDE    = 0x80
 
-
--- ============================================================
--- REFERENCE
+-- Derived from the captured tilemap:
 --
--- Observed:
---
---   0x0C24 -> row 15, column 3
+-- Diagnostic row 12 had its first interior tile at 0x0A9C.
 --
 -- Therefore:
 --
---   address(row,col)
+--   row 0  = 0x049C
+--   row 12 = 0x0A9C
+--   row 22 = 0x0F9C
 --
---     = REFERENCE_ADDRESS
---       + (row - REFERENCE_ROW) * 0x80
---       + (col - REFERENCE_COLUMN) * 0x04
--- ============================================================
-
-local REFERENCE_ADDRESS = 0x0C24
-local REFERENCE_ROW = 15
-local REFERENCE_COLUMN = 3
+-- Some upper rows may belong to another tilemap buffer.
+-- For now, invalid/unrecognized data remains black.
+local GRID_BASE = 0x049C
 
 
 -- ============================================================
--- KNOWN FIRST-SNAKE VALUES
+-- TILE DEFINITIONS
 -- ============================================================
 
-local SNAKE_TILES = {
+local EMPTY_TILE = 0x01
 
+local EXPECTED_ATTRIBUTE = 0x08
+
+
+-- Confirmed first-snake values.
+local CONFIRMED_SNAKE_TILES = {
     [0x23] = true,
-
+    [0x24] = true,
     [0x25] = true,
-
+    [0x28] = true,
     [0x2D] = true
-
 }
 
 
+-- For this first-snake diagnostic, values 0x20 through 0x3F
+-- with attribute 0x08 are treated as likely snake graphics.
+--
+-- This should include straight, bent, head and tail variants.
+local SNAKE_TILE_MIN = 0x20
+local SNAKE_TILE_MAX = 0x3F
+
+
 -- ============================================================
--- DISPLAY SIZE
+-- DISPLAY
 -- ============================================================
 
 local PANEL_WIDTH =
@@ -128,28 +141,12 @@ end
 local function getCellAddress(row, column)
 
     return
-        REFERENCE_ADDRESS
-        + (row - REFERENCE_ROW) * ROW_STRIDE
-        + (column - REFERENCE_COLUMN) * COLUMN_STRIDE
+        GRID_BASE +
+        row * ROW_STRIDE +
+        column * COLUMN_STRIDE
 
 end
 
-
-local function isKnownSnake(value)
-
-    return SNAKE_TILES[value] == true
-
-end
-
-
--- ============================================================
--- READ LOGICAL CELL
---
--- We currently don't know the exact structure of each logical
--- cell, so read four bytes.
---
--- This is important because COLUMN_STRIDE = 4.
--- ============================================================
 
 local function readCell(row, column)
 
@@ -160,152 +157,191 @@ local function readCell(row, column)
         )
 
 
-    local b0 =
+    local tile =
         readByte(address)
 
-    local b1 =
+
+    local attribute =
         readByte(address + 1)
 
-    local b2 =
-        readByte(address + 2)
 
-    local b3 =
-        readByte(address + 3)
-
-
-    return {
-        address = address,
-
-        b0 = b0,
-        b1 = b1,
-        b2 = b2,
-        b3 = b3
-    }
+    return tile, attribute, address
 
 end
 
 
 -- ============================================================
--- CREATE CURRENT MEMORY SIGNATURE
---
--- Used only to prevent console spam.
+-- FIRST-SNAKE CLASSIFICATION
 -- ============================================================
 
-local function buildSignature()
+local function isFirstSnakeTile(tile, attribute)
 
-    local parts = {}
+    -- Require the tilemap attribute observed on the snake.
+    if attribute ~= EXPECTED_ATTRIBUTE then
+        return false
+    end
+
+
+    -- Explicitly confirmed values.
+    if CONFIRMED_SNAKE_TILES[tile] then
+        return true
+    end
+
+
+    -- Likely related sprite variants.
+    if
+        tile >= SNAKE_TILE_MIN and
+        tile <= SNAKE_TILE_MAX
+    then
+
+        return true
+
+    end
+
+
+    return false
+
+end
+
+
+-- ============================================================
+-- FIND CURRENT SNAKE TILES
+-- ============================================================
+
+local function findSnakeTiles()
+
+    local matches = {}
 
 
     for row = 0, GRID_HEIGHT - 1 do
 
         for column = 0, GRID_WIDTH - 1 do
 
-            local cell =
+            local tile, attribute, address =
                 readCell(
                     row,
                     column
                 )
 
 
-            parts[#parts + 1] =
-                string.format(
-                    "%02X%02X%02X%02X",
-                    cell.b0,
-                    cell.b1,
-                    cell.b2,
-                    cell.b3
-                )
+            if isFirstSnakeTile(tile, attribute) then
+
+                matches[#matches + 1] = {
+                    row = row,
+                    column = column,
+                    address = address,
+                    tile = tile,
+                    attribute = attribute
+                }
+
+            end
 
         end
+
+    end
+
+
+    return matches
+
+end
+
+
+-- ============================================================
+-- BUILD MATCH SIGNATURE
+--
+-- Prevents console output every frame.
+-- ============================================================
+
+local function buildMatchSignature(matches)
+
+    local parts = {}
+
+
+    for i = 1, #matches do
+
+        local match =
+            matches[i]
+
+
+        parts[#parts + 1] =
+            string.format(
+                "%04X:%02X",
+                match.address,
+                match.tile
+            )
 
     end
 
 
     return table.concat(
         parts,
-        ":"
+        "|"
     )
 
 end
 
 
 -- ============================================================
--- CONSOLE SNAPSHOT
+-- CONSOLE LOGGING
 -- ============================================================
 
-local function logGridSnapshot()
+local function logMatches(matches)
+
+    local signature =
+        buildMatchSignature(
+            matches
+        )
+
+
+    if signature == previousSignature then
+        return
+    end
+
+
+    previousSignature =
+        signature
+
 
     console.log(
-        "============== GRID CHANGE =============="
+        string.format(
+            "Snake tiles detected: %d",
+            #matches
+        )
     )
 
 
-    for row = 0, GRID_HEIGHT - 1 do
+    for i = 1, #matches do
 
-        local foundSomething = false
+        local match =
+            matches[i]
 
-        local line =
+
+        local confirmation = "candidate"
+
+
+        if CONFIRMED_SNAKE_TILES[match.tile] then
+
+            confirmation = "confirmed"
+
+        end
+
+
+        console.log(
             string.format(
-                "R%02d: ",
-                row
+                "  row=%02d col=%02d addr=0x%04X tile=%02X attr=%02X %s",
+                match.row,
+                match.column,
+                match.address,
+                match.tile,
+                match.attribute,
+                confirmation
             )
-
-
-        for column = 0, GRID_WIDTH - 1 do
-
-            local cell =
-                readCell(
-                    row,
-                    column
-                )
-
-
-            -- -----------------------------------------------
-            -- For now treat an all-zero cell as uninteresting.
-            --
-            -- Everything else gets represented in the row.
-            -- -----------------------------------------------
-
-            if
-                cell.b0 ~= 0 or
-                cell.b1 ~= 0 or
-                cell.b2 ~= 0 or
-                cell.b3 ~= 0
-            then
-
-                foundSomething = true
-
-
-                line =
-                    line ..
-                    string.format(
-                        "C%02d=%02X%02X%02X%02X ",
-                        column,
-                        cell.b0,
-                        cell.b1,
-                        cell.b2,
-                        cell.b3
-                    )
-
-            end
-
-        end
-
-
-        if foundSomething then
-
-            console.log(
-                line
-            )
-
-        end
+        )
 
     end
 
 
-    console.log(
-        "========================================="
-    )
+    console.log("--------------------------------")
 
 end
 
@@ -316,29 +352,39 @@ end
 
 console.clear()
 
+console.log("First-snake tile visualizer")
+console.log("--------------------------------")
+
 console.log(
-    "First-snake grid diagnostic"
+    string.format(
+        "Grid base: 0x%04X",
+        GRID_BASE
+    )
 )
 
 console.log(
-    "Y stride = 0x80"
+    string.format(
+        "Vertical stride: 0x%02X",
+        ROW_STRIDE
+    )
 )
 
 console.log(
-    "X stride = 0x04"
+    string.format(
+        "Horizontal stride: 0x%02X",
+        COLUMN_STRIDE
+    )
 )
 
 console.log(
-    "Known snake IDs = 23, 25, 2D"
+    "Confirmed IDs: 23 24 25 28 2D"
 )
 
 console.log(
-    "Waiting for logical grid changes..."
+    "Candidate IDs: 20-3F with attribute 08"
 )
 
-console.log(
-    "========================================="
-)
+console.log("--------------------------------")
 
 
 -- ============================================================
@@ -348,25 +394,20 @@ console.log(
 while true do
 
     -- ========================================================
-    -- CHECK FOR MEMORY CHANGES
+    -- READ CURRENT GRID
     -- ========================================================
 
-    local signature =
-        buildSignature()
+    local matches =
+        findSnakeTiles()
 
 
-    if signature ~= previousSignature then
-
-        logGridSnapshot()
-
-        previousSignature =
-            signature
-
-    end
+    logMatches(
+        matches
+    )
 
 
     -- ========================================================
-    -- VISUALIZATION
+    -- VISUALIZATION POSITION
     -- ========================================================
 
     local panelX =
@@ -395,38 +436,12 @@ while true do
 
 
     -- ========================================================
-    -- DRAW GRID
+    -- DRAW BLACK GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
 
         for column = 0, GRID_WIDTH - 1 do
-
-            local cell =
-                readCell(
-                    row,
-                    column
-                )
-
-
-            local fillColor =
-                0xFF000000
-
-
-            -- For the moment, check all four bytes for one
-            -- of the confirmed first-snake IDs.
-            if
-                isKnownSnake(cell.b0) or
-                isKnownSnake(cell.b1) or
-                isKnownSnake(cell.b2) or
-                isKnownSnake(cell.b3)
-            then
-
-                fillColor =
-                    0xFF00FF40
-
-            end
-
 
             local x =
                 gridX +
@@ -443,10 +458,41 @@ while true do
                 CELL_PIXELS - 1,
                 CELL_PIXELS - 1,
                 0xFF303030,
-                fillColor
+                0xFF000000
             )
 
         end
+
+    end
+
+
+    -- ========================================================
+    -- DRAW DETECTED FIRST-SNAKE TILES
+    -- ========================================================
+
+    for i = 1, #matches do
+
+        local match =
+            matches[i]
+
+
+        local x =
+            gridX +
+            match.column * CELL_PIXELS
+
+        local y =
+            gridY +
+            match.row * CELL_PIXELS
+
+
+        gui.drawRectangle(
+            x,
+            y,
+            CELL_PIXELS - 1,
+            CELL_PIXELS - 1,
+            0xFFFFFFFF,
+            0xFF00FF40
+        )
 
     end
 
