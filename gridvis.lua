@@ -1,28 +1,56 @@
 -- BizHawk Lua
--- Snake object / sprite memory diagnostic
+-- 12x26 Snake Grid Visualizer
 --
--- DISPLAY:
---   12x26 grid only
+-- Phase 1
 --
--- CONSOLE:
---   Logs detected snake state whenever the detected head
---   address changes.
+-- DISPLAY ONLY:
+--   Black = empty
+--   Green = known snake
 --
--- OBSERVED:
+-- Debug information goes to the Lua console.
 --
--- Falling one row changes the detected address by 0x04:
+-- CONFIRMED FROM FALL TEST:
 --
---   10E0
---   10E4
---   10E8
+--   Vertical movement = +0x80 per grid row
 --
--- This strongly suggests we're looking at sprite/object data,
--- not a normal 12x26 tilemap.
+-- Example:
 --
--- This version dumps surrounding memory whenever the snake
--- position changes so we can identify the actual fields.
+--   0D24
+--   0DA4
+--   0E24
+--   0EA4
+--   0F24
+--   0FA4
+--   1024
+--   10A4
+--
+-- The landed state appears to use a different representation,
+-- so we map the falling playfield independently.
 
 local DOMAIN = "WRAM"
+
+
+-- ============================================================
+-- GRID
+-- ============================================================
+
+local GRID_WIDTH  = 12
+local GRID_HEIGHT = 26
+
+local CELL_PIXELS = 8
+local PANEL_MARGIN = 8
+
+
+-- ============================================================
+-- MEMORY STRUCTURE
+-- ============================================================
+
+-- Confirmed from the falling test.
+local ROW_STRIDE = 0x80
+
+-- Tile/sprite values are separated by 2 bytes horizontally
+-- within the observed horizontal snake.
+local COLUMN_STRIDE = 2
 
 
 -- ============================================================
@@ -34,14 +62,23 @@ local END_ADDR   = 0x1150
 
 
 -- ============================================================
--- GRID DISPLAY
+-- KNOWN SNAKE VALUES
 -- ============================================================
 
-local GRID_WIDTH  = 12
-local GRID_HEIGHT = 26
+local SNAKE_TILES = {
 
-local CELL_PIXELS = 8
-local PANEL_MARGIN = 8
+    [0x2D] = true, -- horizontal head
+
+    [0x25] = true, -- horizontal body
+
+    [0x23] = true  -- tail
+
+}
+
+
+-- ============================================================
+-- PANEL
+-- ============================================================
 
 local PANEL_WIDTH =
     GRID_WIDTH * CELL_PIXELS
@@ -61,29 +98,14 @@ client.SetGameExtraPadding(
 
 
 -- ============================================================
--- KNOWN VALUES
--- ============================================================
-
-local SNAKE_TILES = {
-
-    [0x2D] = true,
-    [0x25] = true,
-    [0x23] = true
-
-}
-
-
--- ============================================================
 -- STATE
 -- ============================================================
 
 local lastHead = nil
 
-local observationNumber = 0
-
 
 -- ============================================================
--- MEMORY
+-- MEMORY HELPERS
 -- ============================================================
 
 local function readByte(address)
@@ -104,13 +126,13 @@ end
 
 
 -- ============================================================
--- FIND HORIZONTAL SNAKE SIGNATURE
+-- FIND HORIZONTAL SNAKE
 --
--- Existing signature:
+-- Detect:
 --
--- 2D ?? 25 ?? 25 ?? 25 ?? 25 ?? 23
+--   2D 25 25 25 25 23
 --
--- We're intentionally checking only every second byte.
+-- at two-byte intervals.
 -- ============================================================
 
 local function findHorizontalSnake()
@@ -138,34 +160,10 @@ end
 
 
 -- ============================================================
--- FORMAT MEMORY BLOCK
+-- LOG MOVEMENT
 -- ============================================================
 
-local function memoryBlock(startAddress, count)
-
-    local result = ""
-
-    for i = 0, count - 1 do
-
-        result =
-            result ..
-            string.format(
-                "%02X ",
-                readByte(startAddress + i)
-            )
-
-    end
-
-    return result
-
-end
-
-
--- ============================================================
--- LOG OBSERVATION
--- ============================================================
-
-local function logObservation(address)
+local function logHead(address)
 
     if address == nil then
         return
@@ -177,27 +175,16 @@ local function logObservation(address)
     end
 
 
-    observationNumber =
-        observationNumber + 1
+    if lastHead == nil then
 
-
-    console.log(
-        string.format(
-            "=== OBSERVATION %d ===",
-            observationNumber
+        console.log(
+            string.format(
+                "Head detected: 0x%04X",
+                address
+            )
         )
-    )
 
-
-    console.log(
-        string.format(
-            "Detected address: 0x%04X",
-            address
-        )
-    )
-
-
-    if lastHead ~= nil then
+    else
 
         local delta =
             address - lastHead
@@ -205,104 +192,15 @@ local function logObservation(address)
 
         console.log(
             string.format(
-                "Previous:         0x%04X",
-                lastHead
-            )
-        )
-
-
-        console.log(
-            string.format(
-                "Delta:            %+d / 0x%X",
+                "Head: 0x%04X -> 0x%04X | delta %+d / 0x%X",
+                lastHead,
+                address,
                 delta,
                 math.abs(delta)
             )
         )
 
     end
-
-
-    -- ========================================================
-    -- Dump 16 bytes before and 32 bytes after.
-    --
-    -- This is more useful than just looking at the bytes
-    -- matching 2D/25/23.
-    -- ========================================================
-
-    local dumpStart =
-        address - 16
-
-
-    console.log(
-        string.format(
-            "Memory 0x%04X-0x%04X:",
-            dumpStart,
-            dumpStart + 47
-        )
-    )
-
-
-    -- Three lines of 16 bytes.
-    for offset = 0, 32, 16 do
-
-        local lineAddress =
-            dumpStart + offset
-
-
-        console.log(
-            string.format(
-                "%04X: %s",
-                lineAddress,
-                memoryBlock(
-                    lineAddress,
-                    16
-                )
-            )
-        )
-
-    end
-
-
-    console.log("")
-
-
-    -- ========================================================
-    -- Also show the 16-bit words around the detection.
-    -- ========================================================
-
-    console.log("16-bit pairs:")
-
-
-    local pairText = ""
-
-
-    for offset = -8, 16, 2 do
-
-        local pairAddress =
-            address + offset
-
-        local low =
-            readByte(pairAddress)
-
-        local high =
-            readByte(pairAddress + 1)
-
-
-        pairText =
-            pairText ..
-            string.format(
-                "%04X=%02X%02X ",
-                pairAddress,
-                low,
-                high
-            )
-
-    end
-
-
-    console.log(pairText)
-
-    console.log("--------------------------------")
 
 
     lastHead =
@@ -312,58 +210,43 @@ end
 
 
 -- ============================================================
--- INITIAL CONSOLE
+-- INITIAL CONSOLE OUTPUT
 -- ============================================================
 
 console.clear()
 
-console.log("Snake object mapping diagnostic")
-console.log("")
-
-console.log(
-    "Observed vertical address movement: 0x10E0 -> 0x10E4 -> 0x10E8"
-)
-
-console.log(
-    "Observed vertical delta: +0x04"
-)
-
-console.log("")
-
-console.log(
-    "Waiting for snake position changes..."
-)
-
+console.log("Snake grid visualizer")
+console.log("--------------------------------")
+console.log("Confirmed vertical stride: 0x80")
+console.log("Observed horizontal spacing: 0x02")
 console.log("--------------------------------")
 
 
 -- ============================================================
--- MAIN LOOP
+-- MAIN
 -- ============================================================
 
 while true do
 
     -- ========================================================
-    -- FIND / LOG
+    -- DETECT CURRENT HORIZONTAL SNAKE
     -- ========================================================
 
-    local currentHead =
+    local headAddress =
         findHorizontalSnake()
 
 
-    if currentHead ~= nil then
+    if headAddress ~= nil then
 
-        logObservation(
-            currentHead
+        logHead(
+            headAddress
         )
 
     end
 
 
     -- ========================================================
-    -- VISUALIZATION
-    --
-    -- Grid only. Debugging remains in console.
+    -- SCREEN POSITION
     -- ========================================================
 
     local panelX =
@@ -376,7 +259,10 @@ while true do
         PANEL_MARGIN
 
 
-    -- Background
+    -- ========================================================
+    -- BACKGROUND
+    -- ========================================================
+
     gui.drawRectangle(
         panelX,
         0,
@@ -387,7 +273,10 @@ while true do
     )
 
 
-    -- Empty grid
+    -- ========================================================
+    -- DRAW EMPTY GRID
+    -- ========================================================
+
     for row = 0, GRID_HEIGHT - 1 do
 
         for column = 0, GRID_WIDTH - 1 do
@@ -395,6 +284,7 @@ while true do
             local x =
                 gridX
                 + column * CELL_PIXELS
+
 
             local y =
                 gridY
@@ -411,6 +301,122 @@ while true do
             )
 
         end
+
+    end
+
+
+    -- ========================================================
+    -- DRAW CURRENT SNAKE
+    --
+    -- For this phase we KNOW:
+    --
+    --   * shape is six cells wide
+    --   * memory advances 2 bytes per snake segment
+    --   * vertical falling movement advances 0x80
+    --
+    -- We do NOT yet know the absolute horizontal origin.
+    --
+    -- So derive the row from the observed address progression
+    -- and temporarily draw the six-cell snake centered.
+    -- ========================================================
+
+    if headAddress ~= nil then
+
+        -- 0x10A4 is the latest confirmed normal falling row
+        -- before the landing representation changes.
+        --
+        -- Treat that as row 24 temporarily.
+        local REFERENCE_ADDRESS =
+            0x10A4
+
+        local REFERENCE_ROW =
+            24
+
+
+        local addressDifference =
+            headAddress
+            - REFERENCE_ADDRESS
+
+
+        local rowOffset =
+            math.floor(
+                addressDifference
+                / ROW_STRIDE
+            )
+
+
+        local snakeRow =
+            REFERENCE_ROW
+            + rowOffset
+
+
+        -- Clamp so malformed/landing states do not draw
+        -- outside the visualization.
+        if snakeRow < 0 then
+            snakeRow = 0
+        end
+
+        if snakeRow >= GRID_HEIGHT then
+            snakeRow =
+                GRID_HEIGHT - 1
+        end
+
+
+        -- We still need to determine the absolute X origin.
+        --
+        -- For now use column 3, roughly matching the
+        -- horizontal position shown in your falling screenshot.
+        local snakeColumn = 3
+
+
+        -- ====================================================
+        -- DRAW SIX SEGMENTS
+        -- ====================================================
+
+        for segment = 0, 5 do
+
+            local column =
+                snakeColumn
+                + segment
+
+
+            if
+                column >= 0 and
+                column < GRID_WIDTH
+            then
+
+                local x =
+                    gridX
+                    + column * CELL_PIXELS
+
+
+                local y =
+                    gridY
+                    + snakeRow * CELL_PIXELS
+
+
+                gui.drawRectangle(
+                    x,
+                    y,
+                    CELL_PIXELS - 1,
+                    CELL_PIXELS - 1,
+                    0xFFFFFFFF,
+                    0xFF00FF40
+                )
+
+            end
+
+        end
+
+
+        -- Console only.
+        console.log(
+            string.format(
+                "Mapped head 0x%04X -> row %d",
+                headAddress,
+                snakeRow
+            )
+        )
 
     end
 
