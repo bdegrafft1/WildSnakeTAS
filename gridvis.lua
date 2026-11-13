@@ -1,81 +1,64 @@
 -- BizHawk Lua
--- Simple 12x26 Snake Tile Visualizer
+-- Raw Snake Memory Visualizer
 --
--- No snake shape detection.
--- No head detection.
--- No relative address calculations.
+-- PURPOSE:
 --
--- Simply:
+-- Stop guessing the game's logical grid mapping.
 --
---   1. Read the tilemap
---   2. Look at each tile ID
---   3. Known snake ID = GREEN
---   4. Anything else = BLACK
+-- Scan the raw memory range directly.
+-- Any byte matching a known snake sprite ID is GREEN.
+-- Everything else is BLACK.
 --
--- Known snake IDs from observed WRAM:
+-- Raw memory is displayed as 32 two-byte entries per row,
+-- matching the apparent 0x40-byte row structure.
 --
---   23
---   24
---   25
---   27
---   28
---   2A
---   2D
---   2E
+-- DISPLAY:
+--   Black = not a known snake value
+--   Green = known/candidate snake value
+--
+-- DEBUG:
+--   Console only, only when matches change.
 
 local DOMAIN = "WRAM"
 
 
 -- ============================================================
--- GRID SIZE
+-- MEMORY RANGE
 -- ============================================================
 
-local GRID_WIDTH  = 12
-local GRID_HEIGHT = 26
+local START_ADDR = 0x0A80
+local END_ADDR   = 0x110E
 
 
 -- ============================================================
--- MEMORY LAYOUT
--- ============================================================
-
--- Tilemap rows are 0x40 bytes apart.
-local ROW_STRIDE = 0x40
-
--- Each tile is:
+-- RAW TILEMAP GEOMETRY
 --
---   byte 0 = tile ID
---   byte 1 = attribute
+-- 0x40 bytes per memory row
+-- 2 bytes per tile
 --
-local TILE_SIZE = 2
+-- = 32 entries per raw memory row
+-- ============================================================
+
+local BYTES_PER_TILE = 2
+local BYTES_PER_ROW  = 0x40
+local RAW_WIDTH      = 32
+
+local RAW_HEIGHT =
+    math.ceil(
+        (END_ADDR - START_ADDR + 1)
+        / BYTES_PER_ROW
+    )
 
 
 -- ============================================================
--- TILEMAP START
+-- KNOWN / CANDIDATE SNAKE IDS
 --
--- Start of the first underlying tilemap row.
--- ============================================================
-
-local TILEMAP_BASE = 0x0A80
-
-
--- ============================================================
--- PLAYFIELD OFFSET
---
--- Number of 2-byte tiles to skip at the beginning of each
--- underlying tilemap row.
---
--- This is intentionally isolated so we can adjust alignment
--- without changing anything else.
--- ============================================================
-
-local PLAYFIELD_X_OFFSET = 1
-
-
--- ============================================================
--- KNOWN SNAKE TILE IDS
+-- Include the values we have observed so far.
 -- ============================================================
 
 local SNAKE_TILES = {
+
+    [0x22] = true,
 
     [0x23] = true,
 
@@ -83,11 +66,19 @@ local SNAKE_TILES = {
 
     [0x25] = true,
 
+    [0x26] = true,
+
     [0x27] = true,
 
     [0x28] = true,
 
+    [0x29] = true,
+
     [0x2A] = true,
+
+    [0x2B] = true,
+
+    [0x2C] = true,
 
     [0x2D] = true,
 
@@ -100,17 +91,15 @@ local SNAKE_TILES = {
 -- DISPLAY
 -- ============================================================
 
-local CELL_PIXELS = 8
-local PANEL_MARGIN = 8
-
+local CELL_PIXELS = 5
+local PANEL_MARGIN = 6
 
 local PANEL_WIDTH =
-    GRID_WIDTH * CELL_PIXELS +
+    RAW_WIDTH * CELL_PIXELS +
     PANEL_MARGIN * 2
 
-
 local PANEL_HEIGHT =
-    GRID_HEIGHT * CELL_PIXELS +
+    RAW_HEIGHT * CELL_PIXELS +
     PANEL_MARGIN * 2
 
 
@@ -123,7 +112,14 @@ client.SetGameExtraPadding(
 
 
 -- ============================================================
--- MEMORY HELPER
+-- STATE
+-- ============================================================
+
+local previousSignature = ""
+
+
+-- ============================================================
+-- MEMORY
 -- ============================================================
 
 local function readByte(address)
@@ -136,71 +132,69 @@ local function readByte(address)
 end
 
 
--- ============================================================
--- GET TILE ADDRESS
---
--- This is intentionally simple:
---
--- row base
--- +
--- horizontal playable-field offset
--- +
--- column
---
--- ============================================================
+local function isSnakeValue(value)
 
-local function getTileAddress(row, column)
-
-    local rowAddress =
-        TILEMAP_BASE +
-        row * ROW_STRIDE
-
-
-    local tileIndex =
-        PLAYFIELD_X_OFFSET +
-        column
-
-
-    return
-        rowAddress +
-        tileIndex * TILE_SIZE
+    return SNAKE_TILES[value] == true
 
 end
 
 
 -- ============================================================
--- READ TILE
+-- SCAN RAW MEMORY
 -- ============================================================
 
-local function readTile(row, column)
+local function scanSnakeValues()
 
-    local address =
-        getTileAddress(
-            row,
-            column
-        )
+    local matches = {}
 
 
-    local tile =
-        readByte(address)
+    -- Read the first byte of every two-byte entry.
+    for address = START_ADDR, END_ADDR, BYTES_PER_TILE do
+
+        local value =
+            readByte(address)
 
 
-    local attribute =
-        readByte(address + 1)
+        if isSnakeValue(value) then
+
+            local offset =
+                address - START_ADDR
 
 
-    return tile, attribute, address
+            local rawRow =
+                math.floor(
+                    offset / BYTES_PER_ROW
+                )
 
-end
+
+            local withinRow =
+                offset % BYTES_PER_ROW
 
 
--- ============================================================
--- IS KNOWN SNAKE
--- ============================================================
+            local rawColumn =
+                math.floor(
+                    withinRow / BYTES_PER_TILE
+                )
 
-local function isSnake(tile)
 
-    return SNAKE_TILES[tile] == true
+            matches[#matches + 1] = {
+
+                address = address,
+
+                value = value,
+
+                row = rawRow,
+
+                column = rawColumn
+
+            }
+
+        end
+
+    end
+
+
+    return matches
 
 end
 
@@ -209,36 +203,112 @@ end
 -- CONSOLE
 -- ============================================================
 
+local function logMatches(matches)
+
+    local parts = {}
+
+
+    for i = 1, #matches do
+
+        local match =
+            matches[i]
+
+
+        parts[#parts + 1] =
+            string.format(
+                "%04X:%02X",
+                match.address,
+                match.value
+            )
+
+    end
+
+
+    local signature =
+        table.concat(
+            parts,
+            "|"
+        )
+
+
+    if signature == previousSignature then
+        return
+    end
+
+
+    previousSignature =
+        signature
+
+
+    console.log(
+        string.format(
+            "Known values found: %d",
+            #matches
+        )
+    )
+
+
+    for i = 1, #matches do
+
+        local match =
+            matches[i]
+
+
+        console.log(
+            string.format(
+                "  0x%04X = %02X -> raw row=%02d col=%02d",
+                match.address,
+                match.value,
+                match.row,
+                match.column
+            )
+        )
+
+    end
+
+
+    console.log(
+        "--------------------------------"
+    )
+
+end
+
+
+-- ============================================================
+-- STARTUP
+-- ============================================================
+
 console.clear()
 
+
 console.log(
-    "Simple snake tile visualizer"
+    "Raw snake memory visualizer"
 )
+
 
 console.log(
     string.format(
-        "Tilemap base: 0x%04X",
-        TILEMAP_BASE
+        "Range: 0x%04X - 0x%04X",
+        START_ADDR,
+        END_ADDR
     )
 )
 
-console.log(
-    string.format(
-        "Row stride: 0x%02X",
-        ROW_STRIDE
-    )
-)
 
 console.log(
-    string.format(
-        "Playfield X offset: %d tiles",
-        PLAYFIELD_X_OFFSET
-    )
+    "Raw geometry: 32 tiles x 0x40-byte rows"
 )
 
+
 console.log(
-    "Known IDs: 23 24 25 27 28 2A 2D 2E"
+    "Candidate IDs: 22-2E"
 )
+
+
+console.log(
+    "No attribute filtering"
+)
+
 
 console.log(
     "--------------------------------"
@@ -252,7 +322,20 @@ console.log(
 while true do
 
     -- ========================================================
-    -- PANEL POSITION
+    -- SCAN
+    -- ========================================================
+
+    local matches =
+        scanSnakeValues()
+
+
+    logMatches(
+        matches
+    )
+
+
+    -- ========================================================
+    -- PANEL
     -- ========================================================
 
     local panelX =
@@ -283,38 +366,12 @@ while true do
 
 
     -- ========================================================
-    -- DRAW GRID
+    -- EMPTY RAW GRID
     -- ========================================================
 
-    for row = 0, GRID_HEIGHT - 1 do
+    for row = 0, RAW_HEIGHT - 1 do
 
-        for column = 0, GRID_WIDTH - 1 do
-
-            local tile, attribute, address =
-                readTile(
-                    row,
-                    column
-                )
-
-
-            local color =
-                0xFF000000
-
-
-            -- ------------------------------------------------
-            -- Don't care about shape.
-            --
-            -- If the tile ID is one we've seen in this snake,
-            -- mark the cell green.
-            -- ------------------------------------------------
-
-            if isSnake(tile) then
-
-                color =
-                    0xFF00FF40
-
-            end
-
+        for column = 0, RAW_WIDTH - 1 do
 
             local x =
                 gridX +
@@ -332,10 +389,42 @@ while true do
                 CELL_PIXELS - 1,
                 CELL_PIXELS - 1,
                 0xFF303030,
-                color
+                0xFF000000
             )
 
         end
+
+    end
+
+
+    -- ========================================================
+    -- KNOWN VALUES
+    -- ========================================================
+
+    for i = 1, #matches do
+
+        local match =
+            matches[i]
+
+
+        local x =
+            gridX +
+            match.column * CELL_PIXELS
+
+
+        local y =
+            gridY +
+            match.row * CELL_PIXELS
+
+
+        gui.drawRectangle(
+            x,
+            y,
+            CELL_PIXELS - 1,
+            CELL_PIXELS - 1,
+            0xFFFFFFFF,
+            0xFF00FF40
+        )
 
     end
 
