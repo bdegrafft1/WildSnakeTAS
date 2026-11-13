@@ -1,23 +1,26 @@
 -- BizHawk Lua
--- 12x26 First Snake Visualizer
---
--- Output is EXACTLY:
---
---   12 columns
---   26 rows
+-- 12x26 First-Snake Visualizer
 --
 -- Black = empty
--- Green = detected snake
+-- Green = detected first snake
 --
--- Memory detection:
+-- MEMORY GEOMETRY:
 --
---   snake candidate IDs = 0x22 through 0x2E
---   horizontal adjacency = 0x02
---   vertical adjacency   = 0x40
+--   horizontal = +0x02
+--   vertical   = +0x40
 --
--- Isolated candidate bytes are ignored.
+-- IMPORTANT:
 --
--- Debug goes to console only.
+-- Previous version normalized the snake's X position:
+--
+--   outputColumn = rawColumn - minColumn
+--
+-- That made every snake appear against the left edge.
+--
+-- This version preserves the REAL raw memory column and
+-- subtracts one fixed playfield offset.
+--
+-- Debug -> console only.
 
 local DOMAIN = "WRAM"
 
@@ -29,14 +32,12 @@ local DOMAIN = "WRAM"
 local GRID_WIDTH  = 12
 local GRID_HEIGHT = 26
 
--- Smaller cells so the output visually matches the game grid.
 local CELL_PIXELS = 5
-
 local PANEL_MARGIN = 4
 
 
 -- ============================================================
--- MEMORY
+-- RAW MEMORY
 -- ============================================================
 
 local SEARCH_START = 0x0A80
@@ -47,7 +48,45 @@ local VERTICAL_STEP   = 0x40
 
 
 -- ============================================================
--- SNAKE IDS
+-- PLAYFIELD CALIBRATION
+--
+-- A raw memory row is 32 tiles wide.
+--
+-- The actual game board uses 12 of those columns.
+--
+-- This value means:
+--
+--   raw column 16 -> game column 0
+--   raw column 17 -> game column 1
+--   ...
+--   raw column 27 -> game column 11
+--
+-- If the entire snake appears:
+--
+--   1 cell too far LEFT:
+--       decrease this by 1
+--
+--   1 cell too far RIGHT:
+--       increase this by 1
+--
+-- ============================================================
+
+local PLAYFIELD_RAW_COLUMN = 16
+
+
+-- ============================================================
+-- VERTICAL CALIBRATION
+--
+-- SEARCH_START is currently treated as raw row zero.
+--
+-- Keep this adjustable independently from X.
+-- ============================================================
+
+local PLAYFIELD_RAW_ROW = 0
+
+
+-- ============================================================
+-- FIRST-SNAKE CANDIDATE IDS
 -- ============================================================
 
 local SNAKE_TILES = {}
@@ -58,33 +97,24 @@ end
 
 
 -- ============================================================
--- FILTER
+-- FILTERING
 --
--- A random matching byte by itself is ignored.
+-- Ignore isolated coincidental values.
 -- ============================================================
 
 local MIN_CLUSTER_SIZE = 2
 
 
 -- ============================================================
--- PANEL SIZE
---
--- 12 * 5 = 60 pixels wide
--- 26 * 5 = 130 pixels tall
+-- DISPLAY SIZE
 -- ============================================================
 
-local GRID_PIXEL_WIDTH =
-    GRID_WIDTH * CELL_PIXELS
-
-local GRID_PIXEL_HEIGHT =
-    GRID_HEIGHT * CELL_PIXELS
-
 local PANEL_WIDTH =
-    GRID_PIXEL_WIDTH +
+    GRID_WIDTH * CELL_PIXELS +
     PANEL_MARGIN * 2
 
 local PANEL_HEIGHT =
-    GRID_PIXEL_HEIGHT +
+    GRID_HEIGHT * CELL_PIXELS +
     PANEL_MARGIN * 2
 
 
@@ -118,7 +148,69 @@ end
 
 
 -- ============================================================
--- SCAN MEMORY
+-- RAW COORDINATES
+--
+-- Convert an address directly into the 32-column raw tilemap.
+-- ============================================================
+
+local function rawCoordinates(address)
+
+    local offset =
+        address - SEARCH_START
+
+
+    local rawRow =
+        math.floor(
+            offset / VERTICAL_STEP
+        )
+
+
+    local byteColumn =
+        offset % VERTICAL_STEP
+
+
+    local rawColumn =
+        math.floor(
+            byteColumn / HORIZONTAL_STEP
+        )
+
+
+    return rawRow, rawColumn
+
+end
+
+
+-- ============================================================
+-- RAW -> GAME GRID
+--
+-- Preserve the actual X/Y position.
+-- ============================================================
+
+local function gameCoordinates(address)
+
+    local rawRow, rawColumn =
+        rawCoordinates(
+            address
+        )
+
+
+    local gameColumn =
+        rawColumn -
+        PLAYFIELD_RAW_COLUMN
+
+
+    local gameRow =
+        rawRow -
+        PLAYFIELD_RAW_ROW
+
+
+    return gameRow, gameColumn
+
+end
+
+
+-- ============================================================
+-- SCAN CANDIDATES
 -- ============================================================
 
 local function scanCandidates()
@@ -164,6 +256,11 @@ end
 
 -- ============================================================
 -- BUILD CONNECTED CLUSTERS
+--
+-- Connected if:
+--
+--   +/- 0x02 horizontally
+--   +/- 0x40 vertically
 -- ============================================================
 
 local function buildClusters(candidates, lookup)
@@ -198,6 +295,7 @@ local function buildClusters(candidates, lookup)
 
                 local address =
                     queue[queueIndex]
+
 
                 queueIndex =
                     queueIndex + 1
@@ -254,488 +352,4 @@ local function buildClusters(candidates, lookup)
             if #cluster >= MIN_CLUSTER_SIZE then
 
                 clusters[#clusters + 1] =
-                    cluster
-
-            end
-
-        end
-
-    end
-
-
-    return clusters
-
-end
-
-
--- ============================================================
--- CHOOSE LARGEST CLUSTER
--- ============================================================
-
-local function chooseSnake(clusters)
-
-    local best = nil
-
-
-    for i = 1, #clusters do
-
-        local cluster =
-            clusters[i]
-
-
-        if
-            best == nil or
-            #cluster > #best
-        then
-
-            best =
-                cluster
-
-        end
-
-    end
-
-
-    return best
-
-end
-
-
--- ============================================================
--- RAW ADDRESS -> RAW MEMORY X/Y
---
--- Each raw memory row:
---
---   0x40 bytes
---
--- Each logical tile:
---
---   2 bytes
---
--- Therefore each raw row contains 32 positions.
--- ============================================================
-
-local function rawCoordinates(address)
-
-    local offset =
-        address - SEARCH_START
-
-
-    local row =
-        math.floor(
-            offset / VERTICAL_STEP
-        )
-
-
-    local byteColumn =
-        offset % VERTICAL_STEP
-
-
-    local column =
-        math.floor(
-            byteColumn / HORIZONTAL_STEP
-        )
-
-
-    return row, column
-
-end
-
-
--- ============================================================
--- MAP SNAKE TO 12x26
---
--- We don't yet know the exact playfield X origin inside the
--- 32-wide raw tilemap.
---
--- Instead of displaying all 32 columns, determine the snake's
--- bounding box and preserve its shape in the 12-wide output.
---
--- Vertical position follows raw memory row.
--- ============================================================
-
-local function mapSnake(cluster)
-
-    local output = {}
-
-
-    if cluster == nil then
-        return output
-    end
-
-
-    local raw = {}
-
-    local minColumn = nil
-
-
-    for i = 1, #cluster do
-
-        local entry =
-            cluster[i]
-
-
-        local row, column =
-            rawCoordinates(
-                entry.address
-            )
-
-
-        raw[#raw + 1] = {
-
-            address = entry.address,
-
-            value = entry.value,
-
-            row = row,
-
-            column = column
-
-        }
-
-
-        if
-            minColumn == nil or
-            column < minColumn
-        then
-
-            minColumn =
-                column
-
-        end
-
-    end
-
-
-    -- --------------------------------------------------------
-    -- X placement
-    --
-    -- Temporarily place the snake starting at its relative
-    -- position within the 12-column board.
-    --
-    -- Using column 0 as the snake bounding-box origin means
-    -- the output can NEVER exceed 12 columns.
-    -- --------------------------------------------------------
-
-    for i = 1, #raw do
-
-        local entry =
-            raw[i]
-
-
-        local outputColumn =
-            entry.column -
-            minColumn
-
-
-        local outputRow =
-            entry.row
-
-
-        if
-            outputColumn >= 0 and
-            outputColumn < GRID_WIDTH and
-            outputRow >= 0 and
-            outputRow < GRID_HEIGHT
-        then
-
-            output[#output + 1] = {
-
-                address = entry.address,
-
-                value = entry.value,
-
-                row = outputRow,
-
-                column = outputColumn
-
-            }
-
-        end
-
-    end
-
-
-    return output
-
-end
-
-
--- ============================================================
--- CONSOLE
--- ============================================================
-
-local function logSnake(cluster)
-
-    local signatureParts = {}
-
-
-    if cluster ~= nil then
-
-        for i = 1, #cluster do
-
-            local entry =
-                cluster[i]
-
-
-            signatureParts[#signatureParts + 1] =
-                string.format(
-                    "%04X:%02X",
-                    entry.address,
-                    entry.value
-                )
-
-        end
-
-    end
-
-
-    local signature =
-        table.concat(
-            signatureParts,
-            "|"
-        )
-
-
-    if signature == previousSignature then
-        return
-    end
-
-
-    previousSignature =
-        signature
-
-
-    if cluster == nil then
-
-        console.log(
-            "Snake: none"
-        )
-
-        return
-
-    end
-
-
-    console.log(
-        string.format(
-            "Snake: %d cells",
-            #cluster
-        )
-    )
-
-
-    for i = 1, #cluster do
-
-        local entry =
-            cluster[i]
-
-
-        local row, column =
-            rawCoordinates(
-                entry.address
-            )
-
-
-        console.log(
-            string.format(
-                "  0x%04X = %02X raw=(%d,%d)",
-                entry.address,
-                entry.value,
-                column,
-                row
-            )
-        )
-
-    end
-
-
-    console.log(
-        "--------------------------------"
-    )
-
-end
-
-
--- ============================================================
--- STARTUP
--- ============================================================
-
-console.clear()
-
-
-console.log(
-    "12x26 snake visualizer"
-)
-
-
-console.log(
-    "Output width: 12"
-)
-
-
-console.log(
-    "Output height: 26"
-)
-
-
-console.log(
-    string.format(
-        "Pixel size: %dx%d",
-        GRID_PIXEL_WIDTH,
-        GRID_PIXEL_HEIGHT
-    )
-)
-
-
-console.log(
-    "Candidate IDs: 22-2E"
-)
-
-
-console.log(
-    "Isolated matches ignored"
-)
-
-
-console.log(
-    "--------------------------------"
-)
-
-
--- ============================================================
--- MAIN LOOP
--- ============================================================
-
-while true do
-
-    -- ========================================================
-    -- DETECT
-    -- ========================================================
-
-    local candidates, lookup =
-        scanCandidates()
-
-
-    local clusters =
-        buildClusters(
-            candidates,
-            lookup
-        )
-
-
-    local cluster =
-        chooseSnake(
-            clusters
-        )
-
-
-    logSnake(
-        cluster
-    )
-
-
-    local snake =
-        mapSnake(
-            cluster
-        )
-
-
-    -- ========================================================
-    -- PANEL POSITION
-    -- ========================================================
-
-    local panelX =
-        client.bufferwidth()
-
-
-    local gridX =
-        panelX +
-        PANEL_MARGIN
-
-
-    local gridY =
-        PANEL_MARGIN
-
-
-    -- ========================================================
-    -- PANEL BACKGROUND
-    -- ========================================================
-
-    gui.drawRectangle(
-        panelX,
-        0,
-        PANEL_WIDTH - 1,
-        PANEL_HEIGHT,
-        0xFF202020,
-        0xFF101010
-    )
-
-
-    -- ========================================================
-    -- EXACTLY 12 x 26 CELLS
-    -- ========================================================
-
-    for row = 0, 25 do
-
-        for column = 0, 11 do
-
-            local x =
-                gridX +
-                column * CELL_PIXELS
-
-
-            local y =
-                gridY +
-                row * CELL_PIXELS
-
-
-            gui.drawRectangle(
-                x,
-                y,
-                CELL_PIXELS - 1,
-                CELL_PIXELS - 1,
-                0xFF404040,
-                0xFF000000
-            )
-
-        end
-
-    end
-
-
-    -- ========================================================
-    -- GREEN SNAKE
-    -- ========================================================
-
-    for i = 1, #snake do
-
-        local cell =
-            snake[i]
-
-
-        local x =
-            gridX +
-            cell.column * CELL_PIXELS
-
-
-        local y =
-            gridY +
-            cell.row * CELL_PIXELS
-
-
-        gui.drawRectangle(
-            x,
-            y,
-            CELL_PIXELS - 1,
-            CELL_PIXELS - 1,
-            0xFFFFFFFF,
-            0xFF00FF40
-        )
-
-    end
-
-
-    emu.frameadvance()
-
-end
+                   
