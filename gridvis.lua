@@ -1,26 +1,23 @@
 -- BizHawk Lua
--- 12x26 Snake Visualizer
+-- 12x26 First Snake Visualizer
 --
--- Strategy:
+-- Output is EXACTLY:
 --
---   1. Scan raw WRAM for known snake tile IDs.
---   2. Group candidates by adjacency in memory:
+--   12 columns
+--   26 rows
 --
---        horizontal = +/- 0x02
---        vertical   = +/- 0x40
+-- Black = empty
+-- Green = detected snake
 --
---   3. Reject isolated/random matches.
---   4. Select the largest connected cluster.
---   5. Draw that cluster on a clean 12x26 grid.
+-- Memory detection:
 --
--- This avoids relying on a questionable global GRID_BASE.
+--   snake candidate IDs = 0x22 through 0x2E
+--   horizontal adjacency = 0x02
+--   vertical adjacency   = 0x40
 --
--- DISPLAY:
---   Black = empty
---   Green = connected snake tiles
+-- Isolated candidate bytes are ignored.
 --
--- CONSOLE:
---   Debug only when the detected snake changes.
+-- Debug goes to console only.
 
 local DOMAIN = "WRAM"
 
@@ -32,12 +29,14 @@ local DOMAIN = "WRAM"
 local GRID_WIDTH  = 12
 local GRID_HEIGHT = 26
 
-local CELL_PIXELS = 8
-local PANEL_MARGIN = 8
+-- Smaller cells so the output visually matches the game grid.
+local CELL_PIXELS = 5
+
+local PANEL_MARGIN = 4
 
 
 -- ============================================================
--- RAW MEMORY
+-- MEMORY
 -- ============================================================
 
 local SEARCH_START = 0x0A80
@@ -48,55 +47,44 @@ local VERTICAL_STEP   = 0x40
 
 
 -- ============================================================
--- SNAKE TILE IDS
---
--- Candidate first-snake sprite family.
+-- SNAKE IDS
 -- ============================================================
 
-local SNAKE_TILES = {
+local SNAKE_TILES = {}
 
-    [0x22] = true,
-    [0x23] = true,
-    [0x24] = true,
-    [0x25] = true,
-    [0x26] = true,
-    [0x27] = true,
-    [0x28] = true,
-    [0x29] = true,
-    [0x2A] = true,
-    [0x2B] = true,
-    [0x2C] = true,
-    [0x2D] = true,
-    [0x2E] = true
-
-}
+for value = 0x22, 0x2E do
+    SNAKE_TILES[value] = true
+end
 
 
 -- ============================================================
--- FILTERING
+-- FILTER
 --
--- Minimum number of connected tiles required before a group
--- is considered a snake.
---
--- Your snake currently has six visible pieces, but using 2
--- allows partial visibility / animation without disappearing.
---
--- Isolated random pixels will be rejected.
+-- A random matching byte by itself is ignored.
 -- ============================================================
 
 local MIN_CLUSTER_SIZE = 2
 
 
 -- ============================================================
--- PANEL
+-- PANEL SIZE
+--
+-- 12 * 5 = 60 pixels wide
+-- 26 * 5 = 130 pixels tall
 -- ============================================================
 
+local GRID_PIXEL_WIDTH =
+    GRID_WIDTH * CELL_PIXELS
+
+local GRID_PIXEL_HEIGHT =
+    GRID_HEIGHT * CELL_PIXELS
+
 local PANEL_WIDTH =
-    GRID_WIDTH * CELL_PIXELS +
+    GRID_PIXEL_WIDTH +
     PANEL_MARGIN * 2
 
 local PANEL_HEIGHT =
-    GRID_HEIGHT * CELL_PIXELS +
+    GRID_PIXEL_HEIGHT +
     PANEL_MARGIN * 2
 
 
@@ -116,7 +104,7 @@ local previousSignature = ""
 
 
 -- ============================================================
--- MEMORY
+-- MEMORY HELPER
 -- ============================================================
 
 local function readByte(address)
@@ -129,18 +117,8 @@ local function readByte(address)
 end
 
 
-local function isSnakeValue(value)
-
-    return SNAKE_TILES[value] == true
-
-end
-
-
 -- ============================================================
--- SCAN CANDIDATES
---
--- Return every two-byte-aligned address containing one of the
--- known/candidate snake tile IDs.
+-- SCAN MEMORY
 -- ============================================================
 
 local function scanCandidates()
@@ -156,9 +134,9 @@ local function scanCandidates()
             readByte(address)
 
 
-        if isSnakeValue(value) then
+        if SNAKE_TILES[value] then
 
-            local entry = {
+            local candidate = {
 
                 address = address,
 
@@ -168,11 +146,11 @@ local function scanCandidates()
 
 
             candidates[#candidates + 1] =
-                entry
+                candidate
 
 
             lookup[address] =
-                entry
+                candidate
 
         end
 
@@ -185,13 +163,7 @@ end
 
 
 -- ============================================================
--- FIND CONNECTED CLUSTERS
---
--- Two candidate tiles are adjacent when their addresses differ
--- by:
---
---   0x02 horizontally
---   0x40 vertically
+-- BUILD CONNECTED CLUSTERS
 -- ============================================================
 
 local function buildClusters(candidates, lookup)
@@ -215,18 +187,17 @@ local function buildClusters(candidates, lookup)
                 start.address
             }
 
+            local queueIndex = 1
+
+
             visited[start.address] =
                 true
-
-
-            local queueIndex = 1
 
 
             while queueIndex <= #queue do
 
                 local address =
                     queue[queueIndex]
-
 
                 queueIndex =
                     queueIndex + 1
@@ -298,11 +269,7 @@ end
 
 
 -- ============================================================
--- CHOOSE SNAKE
---
--- For phase 1 there is only one snake of interest.
---
--- Choose the largest connected candidate cluster.
+-- CHOOSE LARGEST CLUSTER
 -- ============================================================
 
 local function chooseSnake(clusters)
@@ -335,30 +302,71 @@ end
 
 
 -- ============================================================
--- MEMORY ADDRESS -> RAW COORDINATE
+-- RAW ADDRESS -> RAW MEMORY X/Y
 --
--- This coordinate system is relative to the detected cluster,
--- not to the game's absolute playfield.
+-- Each raw memory row:
 --
--- Since:
+--   0x40 bytes
 --
---   x step = 0x02
---   y step = 0x40
+-- Each logical tile:
 --
--- we can derive the shape directly.
+--   2 bytes
+--
+-- Therefore each raw row contains 32 positions.
 -- ============================================================
 
-local function calculateClusterCoordinates(cluster)
+local function rawCoordinates(address)
+
+    local offset =
+        address - SEARCH_START
+
+
+    local row =
+        math.floor(
+            offset / VERTICAL_STEP
+        )
+
+
+    local byteColumn =
+        offset % VERTICAL_STEP
+
+
+    local column =
+        math.floor(
+            byteColumn / HORIZONTAL_STEP
+        )
+
+
+    return row, column
+
+end
+
+
+-- ============================================================
+-- MAP SNAKE TO 12x26
+--
+-- We don't yet know the exact playfield X origin inside the
+-- 32-wide raw tilemap.
+--
+-- Instead of displaying all 32 columns, determine the snake's
+-- bounding box and preserve its shape in the 12-wide output.
+--
+-- Vertical position follows raw memory row.
+-- ============================================================
+
+local function mapSnake(cluster)
+
+    local output = {}
+
 
     if cluster == nil then
-        return {}
+        return output
     end
 
 
-    -- Find the smallest address row represented by the cluster.
-    local minRowBase = nil
+    local raw = {}
 
-    local rawCells = {}
+    local minColumn = nil
 
 
     for i = 1, #cluster do
@@ -367,201 +375,79 @@ local function calculateClusterCoordinates(cluster)
             cluster[i]
 
 
-        local relative =
-            entry.address - SEARCH_START
-
-
-        local row =
-            math.floor(
-                relative / VERTICAL_STEP
+        local row, column =
+            rawCoordinates(
+                entry.address
             )
 
 
-        local byteInRow =
-            relative % VERTICAL_STEP
-
-
-        local column =
-            math.floor(
-                byteInRow / HORIZONTAL_STEP
-            )
-
-
-        rawCells[#rawCells + 1] = {
+        raw[#raw + 1] = {
 
             address = entry.address,
 
             value = entry.value,
 
-            rawRow = row,
+            row = row,
 
-            rawColumn = column
+            column = column
 
         }
 
 
         if
-            minRowBase == nil or
-            row < minRowBase
-        then
-
-            minRowBase = row
-
-        end
-
-    end
-
-
-    return rawCells
-
-end
-
-
--- ============================================================
--- NORMALIZE CLUSTER
---
--- Convert raw memory coordinates into coordinates suitable for
--- the clean 12x26 visualization.
---
--- Keep the shape intact.
---
--- For now:
---   horizontally center the detected snake
---   preserve its raw vertical position as much as possible
--- ============================================================
-
-local function normalizeSnake(rawCells)
-
-    if #rawCells == 0 then
-        return {}
-    end
-
-
-    local minColumn = nil
-    local maxColumn = nil
-
-    local minRow = nil
-    local maxRow = nil
-
-
-    for i = 1, #rawCells do
-
-        local cell =
-            rawCells[i]
-
-
-        if
             minColumn == nil or
-            cell.rawColumn < minColumn
+            column < minColumn
         then
 
             minColumn =
-                cell.rawColumn
-
-        end
-
-
-        if
-            maxColumn == nil or
-            cell.rawColumn > maxColumn
-        then
-
-            maxColumn =
-                cell.rawColumn
-
-        end
-
-
-        if
-            minRow == nil or
-            cell.rawRow < minRow
-        then
-
-            minRow =
-                cell.rawRow
-
-        end
-
-
-        if
-            maxRow == nil or
-            cell.rawRow > maxRow
-        then
-
-            maxRow =
-                cell.rawRow
+                column
 
         end
 
     end
 
 
-    local snakeWidth =
-        maxColumn - minColumn + 1
+    -- --------------------------------------------------------
+    -- X placement
+    --
+    -- Temporarily place the snake starting at its relative
+    -- position within the 12-column board.
+    --
+    -- Using column 0 as the snake bounding-box origin means
+    -- the output can NEVER exceed 12 columns.
+    -- --------------------------------------------------------
+
+    for i = 1, #raw do
+
+        local entry =
+            raw[i]
 
 
-    -- Center horizontally for the moment.
-    local outputStartColumn =
-        math.floor(
-            (GRID_WIDTH - snakeWidth) / 2
-        )
+        local outputColumn =
+            entry.column -
+            minColumn
 
 
-    -- Preserve vertical movement relative to the searched
-    -- memory region.
-    local outputStartRow =
-        minRow
-
-
-    -- Keep it in bounds.
-    if outputStartRow < 0 then
-        outputStartRow = 0
-    end
-
-
-    if outputStartRow >= GRID_HEIGHT then
-
-        outputStartRow =
-            GRID_HEIGHT - 1
-
-    end
-
-
-    local result = {}
-
-
-    for i = 1, #rawCells do
-
-        local cell =
-            rawCells[i]
-
-
-        local column =
-            outputStartColumn +
-            (cell.rawColumn - minColumn)
-
-
-        local row =
-            outputStartRow +
-            (cell.rawRow - minRow)
+        local outputRow =
+            entry.row
 
 
         if
-            column >= 0 and
-            column < GRID_WIDTH and
-            row >= 0 and
-            row < GRID_HEIGHT
+            outputColumn >= 0 and
+            outputColumn < GRID_WIDTH and
+            outputRow >= 0 and
+            outputRow < GRID_HEIGHT
         then
 
-            result[#result + 1] = {
+            output[#output + 1] = {
 
-                address = cell.address,
+                address = entry.address,
 
-                value = cell.value,
+                value = entry.value,
 
-                row = row,
+                row = outputRow,
 
-                column = column
+                column = outputColumn
 
             }
 
@@ -570,33 +456,33 @@ local function normalizeSnake(rawCells)
     end
 
 
-    return result
+    return output
 
 end
 
 
 -- ============================================================
--- CONSOLE LOGGING
+-- CONSOLE
 -- ============================================================
 
-local function logSnake(snake)
+local function logSnake(cluster)
 
-    local parts = {}
-
-
-    if snake ~= nil then
-
-        for i = 1, #snake do
-
-            local cell =
-                snake[i]
+    local signatureParts = {}
 
 
-            parts[#parts + 1] =
+    if cluster ~= nil then
+
+        for i = 1, #cluster do
+
+            local entry =
+                cluster[i]
+
+
+            signatureParts[#signatureParts + 1] =
                 string.format(
                     "%04X:%02X",
-                    cell.address,
-                    cell.value
+                    entry.address,
+                    entry.value
                 )
 
         end
@@ -606,7 +492,7 @@ local function logSnake(snake)
 
     local signature =
         table.concat(
-            parts,
+            signatureParts,
             "|"
         )
 
@@ -620,10 +506,10 @@ local function logSnake(snake)
         signature
 
 
-    if snake == nil then
+    if cluster == nil then
 
         console.log(
-            "Snake cluster: none"
+            "Snake: none"
         )
 
         return
@@ -633,23 +519,31 @@ local function logSnake(snake)
 
     console.log(
         string.format(
-            "Snake cluster: %d tiles",
-            #snake
+            "Snake: %d cells",
+            #cluster
         )
     )
 
 
-    for i = 1, #snake do
+    for i = 1, #cluster do
 
-        local cell =
-            snake[i]
+        local entry =
+            cluster[i]
+
+
+        local row, column =
+            rawCoordinates(
+                entry.address
+            )
 
 
         console.log(
             string.format(
-                "  0x%04X = %02X",
-                cell.address,
-                cell.value
+                "  0x%04X = %02X raw=(%d,%d)",
+                entry.address,
+                entry.value,
+                column,
+                row
             )
         )
 
@@ -671,30 +565,36 @@ console.clear()
 
 
 console.log(
-    "Connected snake visualizer"
+    "12x26 snake visualizer"
 )
 
 
 console.log(
-    "Raw horizontal adjacency: 0x02"
+    "Output width: 12"
 )
 
 
 console.log(
-    "Raw vertical adjacency: 0x40"
-)
-
-
-console.log(
-    "Isolated candidate values are ignored"
+    "Output height: 26"
 )
 
 
 console.log(
     string.format(
-        "Minimum cluster: %d",
-        MIN_CLUSTER_SIZE
+        "Pixel size: %dx%d",
+        GRID_PIXEL_WIDTH,
+        GRID_PIXEL_HEIGHT
     )
+)
+
+
+console.log(
+    "Candidate IDs: 22-2E"
+)
+
+
+console.log(
+    "Isolated matches ignored"
 )
 
 
@@ -704,13 +604,13 @@ console.log(
 
 
 -- ============================================================
--- MAIN
+-- MAIN LOOP
 -- ============================================================
 
 while true do
 
     -- ========================================================
-    -- DETECT CONNECTED SNAKE
+    -- DETECT
     -- ========================================================
 
     local candidates, lookup =
@@ -724,26 +624,20 @@ while true do
         )
 
 
-    local snake =
+    local cluster =
         chooseSnake(
             clusters
         )
 
 
     logSnake(
-        snake
+        cluster
     )
 
 
-    local rawCells =
-        calculateClusterCoordinates(
-            snake
-        )
-
-
-    local displayCells =
-        normalizeSnake(
-            rawCells
+    local snake =
+        mapSnake(
+            cluster
         )
 
 
@@ -765,7 +659,7 @@ while true do
 
 
     -- ========================================================
-    -- BACKGROUND
+    -- PANEL BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
@@ -773,18 +667,18 @@ while true do
         0,
         PANEL_WIDTH - 1,
         PANEL_HEIGHT,
-        0xFF404040,
+        0xFF202020,
         0xFF101010
     )
 
 
     -- ========================================================
-    -- CLEAN 12x26 GRID
+    -- EXACTLY 12 x 26 CELLS
     -- ========================================================
 
-    for row = 0, GRID_HEIGHT - 1 do
+    for row = 0, 25 do
 
-        for column = 0, GRID_WIDTH - 1 do
+        for column = 0, 11 do
 
             local x =
                 gridX +
@@ -801,7 +695,7 @@ while true do
                 y,
                 CELL_PIXELS - 1,
                 CELL_PIXELS - 1,
-                0xFF303030,
+                0xFF404040,
                 0xFF000000
             )
 
@@ -811,13 +705,13 @@ while true do
 
 
     -- ========================================================
-    -- DETECTED CONNECTED SNAKE
+    -- GREEN SNAKE
     -- ========================================================
 
-    for i = 1, #displayCells do
+    for i = 1, #snake do
 
         local cell =
-            displayCells[i]
+            snake[i]
 
 
         local x =
