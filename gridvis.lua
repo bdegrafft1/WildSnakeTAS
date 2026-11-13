@@ -1,105 +1,102 @@
 -- BizHawk Lua
--- Raw Snake Memory Visualizer
+-- 12x26 Snake Visualizer
 --
--- PURPOSE:
+-- Strategy:
 --
--- Stop guessing the game's logical grid mapping.
+--   1. Scan raw WRAM for known snake tile IDs.
+--   2. Group candidates by adjacency in memory:
 --
--- Scan the raw memory range directly.
--- Any byte matching a known snake sprite ID is GREEN.
--- Everything else is BLACK.
+--        horizontal = +/- 0x02
+--        vertical   = +/- 0x40
 --
--- Raw memory is displayed as 32 two-byte entries per row,
--- matching the apparent 0x40-byte row structure.
+--   3. Reject isolated/random matches.
+--   4. Select the largest connected cluster.
+--   5. Draw that cluster on a clean 12x26 grid.
+--
+-- This avoids relying on a questionable global GRID_BASE.
 --
 -- DISPLAY:
---   Black = not a known snake value
---   Green = known/candidate snake value
+--   Black = empty
+--   Green = connected snake tiles
 --
--- DEBUG:
---   Console only, only when matches change.
+-- CONSOLE:
+--   Debug only when the detected snake changes.
 
 local DOMAIN = "WRAM"
 
 
 -- ============================================================
--- MEMORY RANGE
+-- OUTPUT GRID
 -- ============================================================
 
-local START_ADDR = 0x0A80
-local END_ADDR   = 0x110E
+local GRID_WIDTH  = 12
+local GRID_HEIGHT = 26
+
+local CELL_PIXELS = 8
+local PANEL_MARGIN = 8
 
 
 -- ============================================================
--- RAW TILEMAP GEOMETRY
+-- RAW MEMORY
+-- ============================================================
+
+local SEARCH_START = 0x0A80
+local SEARCH_END   = 0x110E
+
+local HORIZONTAL_STEP = 0x02
+local VERTICAL_STEP   = 0x40
+
+
+-- ============================================================
+-- SNAKE TILE IDS
 --
--- 0x40 bytes per memory row
--- 2 bytes per tile
---
--- = 32 entries per raw memory row
--- ============================================================
-
-local BYTES_PER_TILE = 2
-local BYTES_PER_ROW  = 0x40
-local RAW_WIDTH      = 32
-
-local RAW_HEIGHT =
-    math.ceil(
-        (END_ADDR - START_ADDR + 1)
-        / BYTES_PER_ROW
-    )
-
-
--- ============================================================
--- KNOWN / CANDIDATE SNAKE IDS
---
--- Include the values we have observed so far.
+-- Candidate first-snake sprite family.
 -- ============================================================
 
 local SNAKE_TILES = {
 
     [0x22] = true,
-
     [0x23] = true,
-
     [0x24] = true,
-
     [0x25] = true,
-
     [0x26] = true,
-
     [0x27] = true,
-
     [0x28] = true,
-
     [0x29] = true,
-
     [0x2A] = true,
-
     [0x2B] = true,
-
     [0x2C] = true,
-
     [0x2D] = true,
-
     [0x2E] = true
 
 }
 
 
 -- ============================================================
--- DISPLAY
+-- FILTERING
+--
+-- Minimum number of connected tiles required before a group
+-- is considered a snake.
+--
+-- Your snake currently has six visible pieces, but using 2
+-- allows partial visibility / animation without disappearing.
+--
+-- Isolated random pixels will be rejected.
 -- ============================================================
 
-local CELL_PIXELS = 5
-local PANEL_MARGIN = 6
+local MIN_CLUSTER_SIZE = 2
+
+
+-- ============================================================
+-- PANEL
+-- ============================================================
 
 local PANEL_WIDTH =
-    RAW_WIDTH * CELL_PIXELS +
+    GRID_WIDTH * CELL_PIXELS +
     PANEL_MARGIN * 2
 
 local PANEL_HEIGHT =
-    RAW_HEIGHT * CELL_PIXELS +
+    GRID_HEIGHT * CELL_PIXELS +
     PANEL_MARGIN * 2
 
 
@@ -140,16 +137,20 @@ end
 
 
 -- ============================================================
--- SCAN RAW MEMORY
+-- SCAN CANDIDATES
+--
+-- Return every two-byte-aligned address containing one of the
+-- known/candidate snake tile IDs.
 -- ============================================================
 
-local function scanSnakeValues()
+local function scanCandidates()
 
-    local matches = {}
+    local candidates = {}
+
+    local lookup = {}
 
 
-    -- Read the first byte of every two-byte entry.
-    for address = START_ADDR, END_ADDR, BYTES_PER_TILE do
+    for address = SEARCH_START, SEARCH_END, 2 do
 
         local value =
             readByte(address)
@@ -157,35 +158,410 @@ local function scanSnakeValues()
 
         if isSnakeValue(value) then
 
-            local offset =
-                address - START_ADDR
-
-
-            local rawRow =
-                math.floor(
-                    offset / BYTES_PER_ROW
-                )
-
-
-            local withinRow =
-                offset % BYTES_PER_ROW
-
-
-            local rawColumn =
-                math.floor(
-                    withinRow / BYTES_PER_TILE
-                )
-
-
-            matches[#matches + 1] = {
+            local entry = {
 
                 address = address,
 
-                value = value,
+                value = value
 
-                row = rawRow,
+            }
 
-                column = rawColumn
+
+            candidates[#candidates + 1] =
+                entry
+
+
+            lookup[address] =
+                entry
+
+        end
+
+    end
+
+
+    return candidates, lookup
+
+end
+
+
+-- ============================================================
+-- FIND CONNECTED CLUSTERS
+--
+-- Two candidate tiles are adjacent when their addresses differ
+-- by:
+--
+--   0x02 horizontally
+--   0x40 vertically
+-- ============================================================
+
+local function buildClusters(candidates, lookup)
+
+    local clusters = {}
+
+    local visited = {}
+
+
+    for i = 1, #candidates do
+
+        local start =
+            candidates[i]
+
+
+        if not visited[start.address] then
+
+            local cluster = {}
+
+            local queue = {
+                start.address
+            }
+
+            visited[start.address] =
+                true
+
+
+            local queueIndex = 1
+
+
+            while queueIndex <= #queue do
+
+                local address =
+                    queue[queueIndex]
+
+
+                queueIndex =
+                    queueIndex + 1
+
+
+                local entry =
+                    lookup[address]
+
+
+                if entry ~= nil then
+
+                    cluster[#cluster + 1] =
+                        entry
+
+
+                    local neighbours = {
+
+                        address - HORIZONTAL_STEP,
+                        address + HORIZONTAL_STEP,
+
+                        address - VERTICAL_STEP,
+                        address + VERTICAL_STEP
+
+                    }
+
+
+                    for n = 1, #neighbours do
+
+                        local neighbour =
+                            neighbours[n]
+
+
+                        if
+                            lookup[neighbour] ~= nil and
+                            not visited[neighbour]
+                        then
+
+                            visited[neighbour] =
+                                true
+
+
+                            queue[#queue + 1] =
+                                neighbour
+
+                        end
+
+                    end
+
+                end
+
+            end
+
+
+            if #cluster >= MIN_CLUSTER_SIZE then
+
+                clusters[#clusters + 1] =
+                    cluster
+
+            end
+
+        end
+
+    end
+
+
+    return clusters
+
+end
+
+
+-- ============================================================
+-- CHOOSE SNAKE
+--
+-- For phase 1 there is only one snake of interest.
+--
+-- Choose the largest connected candidate cluster.
+-- ============================================================
+
+local function chooseSnake(clusters)
+
+    local best = nil
+
+
+    for i = 1, #clusters do
+
+        local cluster =
+            clusters[i]
+
+
+        if
+            best == nil or
+            #cluster > #best
+        then
+
+            best =
+                cluster
+
+        end
+
+    end
+
+
+    return best
+
+end
+
+
+-- ============================================================
+-- MEMORY ADDRESS -> RAW COORDINATE
+--
+-- This coordinate system is relative to the detected cluster,
+-- not to the game's absolute playfield.
+--
+-- Since:
+--
+--   x step = 0x02
+--   y step = 0x40
+--
+-- we can derive the shape directly.
+-- ============================================================
+
+local function calculateClusterCoordinates(cluster)
+
+    if cluster == nil then
+        return {}
+    end
+
+
+    -- Find the smallest address row represented by the cluster.
+    local minRowBase = nil
+
+    local rawCells = {}
+
+
+    for i = 1, #cluster do
+
+        local entry =
+            cluster[i]
+
+
+        local relative =
+            entry.address - SEARCH_START
+
+
+        local row =
+            math.floor(
+                relative / VERTICAL_STEP
+            )
+
+
+        local byteInRow =
+            relative % VERTICAL_STEP
+
+
+        local column =
+            math.floor(
+                byteInRow / HORIZONTAL_STEP
+            )
+
+
+        rawCells[#rawCells + 1] = {
+
+            address = entry.address,
+
+            value = entry.value,
+
+            rawRow = row,
+
+            rawColumn = column
+
+        }
+
+
+        if
+            minRowBase == nil or
+            row < minRowBase
+        then
+
+            minRowBase = row
+
+        end
+
+    end
+
+
+    return rawCells
+
+end
+
+
+-- ============================================================
+-- NORMALIZE CLUSTER
+--
+-- Convert raw memory coordinates into coordinates suitable for
+-- the clean 12x26 visualization.
+--
+-- Keep the shape intact.
+--
+-- For now:
+--   horizontally center the detected snake
+--   preserve its raw vertical position as much as possible
+-- ============================================================
+
+local function normalizeSnake(rawCells)
+
+    if #rawCells == 0 then
+        return {}
+    end
+
+
+    local minColumn = nil
+    local maxColumn = nil
+
+    local minRow = nil
+    local maxRow = nil
+
+
+    for i = 1, #rawCells do
+
+        local cell =
+            rawCells[i]
+
+
+        if
+            minColumn == nil or
+            cell.rawColumn < minColumn
+        then
+
+            minColumn =
+                cell.rawColumn
+
+        end
+
+
+        if
+            maxColumn == nil or
+            cell.rawColumn > maxColumn
+        then
+
+            maxColumn =
+                cell.rawColumn
+
+        end
+
+
+        if
+            minRow == nil or
+            cell.rawRow < minRow
+        then
+
+            minRow =
+                cell.rawRow
+
+        end
+
+
+        if
+            maxRow == nil or
+            cell.rawRow > maxRow
+        then
+
+            maxRow =
+                cell.rawRow
+
+        end
+
+    end
+
+
+    local snakeWidth =
+        maxColumn - minColumn + 1
+
+
+    -- Center horizontally for the moment.
+    local outputStartColumn =
+        math.floor(
+            (GRID_WIDTH - snakeWidth) / 2
+        )
+
+
+    -- Preserve vertical movement relative to the searched
+    -- memory region.
+    local outputStartRow =
+        minRow
+
+
+    -- Keep it in bounds.
+    if outputStartRow < 0 then
+        outputStartRow = 0
+    end
+
+
+    if outputStartRow >= GRID_HEIGHT then
+
+        outputStartRow =
+            GRID_HEIGHT - 1
+
+    end
+
+
+    local result = {}
+
+
+    for i = 1, #rawCells do
+
+        local cell =
+            rawCells[i]
+
+
+        local column =
+            outputStartColumn +
+            (cell.rawColumn - minColumn)
+
+
+        local row =
+            outputStartRow +
+            (cell.rawRow - minRow)
+
+
+        if
+            column >= 0 and
+            column < GRID_WIDTH and
+            row >= 0 and
+            row < GRID_HEIGHT
+        then
+
+            result[#result + 1] = {
+
+                address = cell.address,
+
+                value = cell.value,
+
+                row = row,
+
+                column = column
 
             }
 
@@ -194,32 +570,36 @@ local function scanSnakeValues()
     end
 
 
-    return matches
+    return result
 
 end
 
 
 -- ============================================================
--- CONSOLE
+-- CONSOLE LOGGING
 -- ============================================================
 
-local function logMatches(matches)
+local function logSnake(snake)
 
     local parts = {}
 
 
-    for i = 1, #matches do
+    if snake ~= nil then
 
-        local match =
-            matches[i]
+        for i = 1, #snake do
+
+            local cell =
+                snake[i]
 
 
-        parts[#parts + 1] =
-            string.format(
-                "%04X:%02X",
-                match.address,
-                match.value
-            )
+            parts[#parts + 1] =
+                string.format(
+                    "%04X:%02X",
+                    cell.address,
+                    cell.value
+                )
+
+        end
 
     end
 
@@ -240,27 +620,36 @@ local function logMatches(matches)
         signature
 
 
+    if snake == nil then
+
+        console.log(
+            "Snake cluster: none"
+        )
+
+        return
+
+    end
+
+
     console.log(
         string.format(
-            "Known values found: %d",
-            #matches
+            "Snake cluster: %d tiles",
+            #snake
         )
     )
 
 
-    for i = 1, #matches do
+    for i = 1, #snake do
 
-        local match =
-            matches[i]
+        local cell =
+            snake[i]
 
 
         console.log(
             string.format(
-                "  0x%04X = %02X -> raw row=%02d col=%02d",
-                match.address,
-                match.value,
-                match.row,
-                match.column
+                "  0x%04X = %02X",
+                cell.address,
+                cell.value
             )
         )
 
@@ -282,31 +671,30 @@ console.clear()
 
 
 console.log(
-    "Raw snake memory visualizer"
+    "Connected snake visualizer"
+)
+
+
+console.log(
+    "Raw horizontal adjacency: 0x02"
+)
+
+
+console.log(
+    "Raw vertical adjacency: 0x40"
+)
+
+
+console.log(
+    "Isolated candidate values are ignored"
 )
 
 
 console.log(
     string.format(
-        "Range: 0x%04X - 0x%04X",
-        START_ADDR,
-        END_ADDR
+        "Minimum cluster: %d",
+        MIN_CLUSTER_SIZE
     )
-)
-
-
-console.log(
-    "Raw geometry: 32 tiles x 0x40-byte rows"
-)
-
-
-console.log(
-    "Candidate IDs: 22-2E"
-)
-
-
-console.log(
-    "No attribute filtering"
 )
 
 
@@ -316,26 +704,51 @@ console.log(
 
 
 -- ============================================================
--- MAIN LOOP
+-- MAIN
 -- ============================================================
 
 while true do
 
     -- ========================================================
-    -- SCAN
+    -- DETECT CONNECTED SNAKE
     -- ========================================================
 
-    local matches =
-        scanSnakeValues()
+    local candidates, lookup =
+        scanCandidates()
 
 
-    logMatches(
-        matches
+    local clusters =
+        buildClusters(
+            candidates,
+            lookup
+        )
+
+
+    local snake =
+        chooseSnake(
+            clusters
+        )
+
+
+    logSnake(
+        snake
     )
 
 
+    local rawCells =
+        calculateClusterCoordinates(
+            snake
+        )
+
+
+    local displayCells =
+        normalizeSnake(
+            rawCells
+        )
+
+
     -- ========================================================
-    -- PANEL
+    -- PANEL POSITION
     -- ========================================================
 
     local panelX =
@@ -366,12 +779,12 @@ while true do
 
 
     -- ========================================================
-    -- EMPTY RAW GRID
+    -- CLEAN 12x26 GRID
     -- ========================================================
 
-    for row = 0, RAW_HEIGHT - 1 do
+    for row = 0, GRID_HEIGHT - 1 do
 
-        for column = 0, RAW_WIDTH - 1 do
+        for column = 0, GRID_WIDTH - 1 do
 
             local x =
                 gridX +
@@ -398,23 +811,23 @@ while true do
 
 
     -- ========================================================
-    -- KNOWN VALUES
+    -- DETECTED CONNECTED SNAKE
     -- ========================================================
 
-    for i = 1, #matches do
+    for i = 1, #displayCells do
 
-        local match =
-            matches[i]
+        local cell =
+            displayCells[i]
 
 
         local x =
             gridX +
-            match.column * CELL_PIXELS
+            cell.column * CELL_PIXELS
 
 
         local y =
             gridY +
-            match.row * CELL_PIXELS
+            cell.row * CELL_PIXELS
 
 
         gui.drawRectangle(
