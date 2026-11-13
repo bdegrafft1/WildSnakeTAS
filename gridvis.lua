@@ -1,28 +1,36 @@
 -- BizHawk Lua
--- 12x26 Snake Grid Visualizer
+-- 12x26 Snake Grid + Console Debugging
 --
--- Phase 1:
+-- DISPLAY:
 --   Black = empty / unknown
 --   Green = known snake sprite
 --
--- CONFIRMED:
+-- CONSOLE:
+--   Current snake head address
+--   Delta from previous position
+--   Delta from confirmed bottom position
 --
--- Bottom row:
+-- Confirmed horizontal snake at bottom:
 --
---   column 0  = 0x10DC
---   column 6  = 0x10E8 = 2D
---   column 7  = 0x10EA = 25
---   column 8  = 0x10EC = 25
---   column 9  = 0x10EE = 25
---   column 10 = 0x10F0 = 25
---   column 11 = 0x10F2 = 23
---
--- This version does NOT assume a fixed vertical row stride.
---
--- Instead, it searches backwards from the confirmed bottom
--- row for candidate board rows.
+--   10E8 = 2D   head
+--   10EA = 25   body
+--   10EC = 25   body
+--   10EE = 25   body
+--   10F0 = 25   body
+--   10F2 = 23   tail
 
 local DOMAIN = "WRAM"
+
+
+-- ============================================================
+-- MEMORY SEARCH RANGE
+-- ============================================================
+
+local START_ADDR = 0x0A00
+local END_ADDR   = 0x1150
+
+local CELL_SIZE = 2
+
 
 -- ============================================================
 -- GRID
@@ -31,18 +39,20 @@ local DOMAIN = "WRAM"
 local GRID_WIDTH  = 12
 local GRID_HEIGHT = 26
 
-local CELL_SIZE = 2
+local CELL_PIXELS = 8
+local PANEL_MARGIN = 8
 
 
 -- ============================================================
--- CONFIRMED BOTTOM ROW
+-- CONFIRMED BOTTOM POSITION
 -- ============================================================
 
 local BOTTOM_ROW_BASE = 0x10DC
+local CONFIRMED_BOTTOM_HEAD = 0x10E8
 
 
 -- ============================================================
--- KNOWN SNAKE TILE VALUES
+-- KNOWN SNAKE VALUES
 -- ============================================================
 
 local SNAKE_TILES = {
@@ -57,26 +67,8 @@ local SNAKE_TILES = {
 
 
 -- ============================================================
--- EMPTY / NORMAL BOARD TILE
---
--- The raw dump repeatedly shows:
---
---     01 08
---
--- for empty board locations.
---
--- So 01 is treated as an empty playable tile.
+-- PANEL
 -- ============================================================
-
-local EMPTY_TILE = 0x01
-
-
--- ============================================================
--- DISPLAY
--- ============================================================
-
-local CELL_PIXELS = 8
-local PANEL_MARGIN = 8
 
 local PANEL_WIDTH =
     GRID_WIDTH * CELL_PIXELS
@@ -85,7 +77,6 @@ local PANEL_WIDTH =
 local PANEL_HEIGHT =
     GRID_HEIGHT * CELL_PIXELS
     + PANEL_MARGIN * 2
-    + 22
 
 
 client.SetGameExtraPadding(
@@ -97,15 +88,19 @@ client.SetGameExtraPadding(
 
 
 -- ============================================================
--- HELPERS
+-- STATE
 -- ============================================================
 
-local function isSnakeTile(value)
+local lastHead = nil
 
-    return SNAKE_TILES[value] == true
+local observedAddresses = {}
 
-end
+local observedLookup = {}
 
+
+-- ============================================================
+-- HELPERS
+-- ============================================================
 
 local function readByte(address)
 
@@ -117,157 +112,175 @@ local function readByte(address)
 end
 
 
--- ============================================================
--- ROW DETECTION
---
--- A board row should contain 12 consecutive 2-byte entries.
---
--- Empty playable locations usually look like:
---
---   01 08
---
--- Snake locations look like:
---
---   XX 08
---
--- So the strongest structural marker is currently the
--- attribute byte 08.
---
--- This function gives a candidate row a score based on
--- how many of its 12 cells have attribute == 08.
--- ============================================================
+local function isSnake(value)
 
-local function rowScore(baseAddress)
-
-    local score = 0
-
-    for column = 0, GRID_WIDTH - 1 do
-
-        local address =
-            baseAddress
-            + column * CELL_SIZE
-
-        local attribute =
-            readByte(address + 1)
-
-        if attribute == 0x08 then
-
-            score =
-                score + 1
-
-        end
-
-    end
-
-    return score
+    return SNAKE_TILES[value] == true
 
 end
 
 
 -- ============================================================
--- FIND PREVIOUS ROW
+-- FIND HORIZONTAL SNAKE
 --
--- Search backwards from the current row.
+-- Search for:
 --
--- From the supplied memory dump, rows appear to have other
--- structures between them, so we search rather than assume
--- 0x40.
+-- 2D 25 25 25 25 23
 --
--- A perfect candidate has 12/12 attribute bytes == 08.
+-- Each tile is two bytes apart.
 -- ============================================================
 
-local function findPreviousRow(currentBase)
+local function findHorizontalSnake()
 
-    -- Avoid accidentally finding the current row shifted by
-    -- only one or two cells.
-    local searchStart =
-        currentBase - 0x18
+    for address = START_ADDR, END_ADDR - 10, 2 do
 
-    -- Search up to 0x100 bytes backwards.
-    local searchEnd =
-        currentBase - 0x100
+        if
+            readByte(address)      == 0x2D and
+            readByte(address + 2)  == 0x25 and
+            readByte(address + 4)  == 0x25 and
+            readByte(address + 6)  == 0x25 and
+            readByte(address + 8)  == 0x25 and
+            readByte(address + 10) == 0x23
+        then
 
-    local bestAddress = nil
-    local bestScore = -1
-
-    -- Keep addresses even because cells are 2-byte entries.
-    if searchStart % 2 ~= 0 then
-
-        searchStart =
-            searchStart - 1
-
-    end
-
-
-    for candidate = searchStart, searchEnd, -2 do
-
-        local score =
-            rowScore(candidate)
-
-        if score > bestScore then
-
-            bestScore =
-                score
-
-            bestAddress =
-                candidate
-
-        end
-
-
-        -- 12/12 is good enough.
-        if score == GRID_WIDTH then
-
-            return candidate, score
+            return address
 
         end
 
     end
 
-
-    return bestAddress, bestScore
+    return nil
 
 end
 
 
 -- ============================================================
--- BUILD ROW TABLE
---
--- rowBases[26] = confirmed bottom
--- then search backwards to rowBases[1].
+-- LOG POSITION
 -- ============================================================
 
-local function buildRowTable()
+local function logPosition(address)
 
-    local rows = {}
-    local scores = {}
-
-    rows[GRID_HEIGHT] =
-        BOTTOM_ROW_BASE
-
-    scores[GRID_HEIGHT] =
-        rowScore(BOTTOM_ROW_BASE)
+    if address == nil then
+        return
+    end
 
 
-    for row = GRID_HEIGHT - 1, 1, -1 do
+    -- Only log when the head actually moves.
+    if address == lastHead then
+        return
+    end
 
-        local previousAddress, score =
-            findPreviousRow(
-                rows[row + 1]
+
+    local deltaPrevious = nil
+
+    if lastHead ~= nil then
+
+        deltaPrevious =
+            address - lastHead
+
+    end
+
+
+    local deltaBottom =
+        address - CONFIRMED_BOTTOM_HEAD
+
+
+    -- ========================================================
+    -- NEW UNIQUE POSITION
+    -- ========================================================
+
+    if not observedLookup[address] then
+
+        observedLookup[address] = true
+
+        observedAddresses[
+            #observedAddresses + 1
+        ] = address
+
+    end
+
+
+    -- ========================================================
+    -- CONSOLE OUTPUT
+    -- ========================================================
+
+    console.log(
+        string.format(
+            "Snake head: 0x%04X",
+            address
+        )
+    )
+
+
+    if deltaPrevious ~= nil then
+
+        console.log(
+            string.format(
+                "  previous: 0x%04X",
+                lastHead
             )
+        )
 
-        rows[row] =
-            previousAddress
-
-        scores[row] =
-            score
+        console.log(
+            string.format(
+                "  delta previous: %+d / 0x%X",
+                deltaPrevious,
+                math.abs(deltaPrevious)
+            )
+        )
 
     end
 
 
-    return rows, scores
+    console.log(
+        string.format(
+            "  delta bottom: %+d",
+            deltaBottom
+        )
+    )
+
+
+    console.log(
+        string.format(
+            "  unique position #%d",
+            #observedAddresses
+        )
+    )
+
+
+    console.log("--------------------------------")
+
+
+    lastHead =
+        address
 
 end
+
+
+-- ============================================================
+-- INITIAL CONSOLE INFO
+-- ============================================================
+
+console.clear()
+
+console.log("Snake grid diagnostic started")
+console.log("")
+
+console.log(
+    string.format(
+        "Confirmed bottom head: 0x%04X",
+        CONFIRMED_BOTTOM_HEAD
+    )
+)
+
+console.log(
+    string.format(
+        "Confirmed bottom row: 0x%04X",
+        BOTTOM_ROW_BASE
+    )
+)
+
+console.log("Waiting for horizontal snake...")
+console.log("--------------------------------")
 
 
 -- ============================================================
@@ -276,9 +289,26 @@ end
 
 while true do
 
-    local rowBases, rowScores =
-        buildRowTable()
+    -- ========================================================
+    -- FIND CURRENT SNAKE
+    -- ========================================================
 
+    local currentHead =
+        findHorizontalSnake()
+
+
+    if currentHead ~= nil then
+
+        logPosition(
+            currentHead
+        )
+
+    end
+
+
+    -- ========================================================
+    -- PANEL POSITION
+    -- ========================================================
 
     local panelX =
         client.bufferwidth()
@@ -287,11 +317,11 @@ while true do
         panelX + PANEL_MARGIN
 
     local gridY =
-        8
+        PANEL_MARGIN
 
 
     -- ========================================================
-    -- BACKGROUND
+    -- PANEL BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
@@ -305,46 +335,20 @@ while true do
 
 
     -- ========================================================
-    -- DRAW 12x26 GRID
+    -- DRAW BLANK 12x26 GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
 
-        local rowBase =
-            rowBases[row + 1]
-
-
         for column = 0, GRID_WIDTH - 1 do
-
-            local address =
-                rowBase
-                + column * CELL_SIZE
-
-
-            local tile =
-                readByte(address)
-
 
             local x =
                 gridX
                 + column * CELL_PIXELS
 
-
             local y =
                 gridY
                 + row * CELL_PIXELS
-
-
-            local fillColor =
-                0xFF000000
-
-
-            if isSnakeTile(tile) then
-
-                fillColor =
-                    0xFF00FF40
-
-            end
 
 
             gui.drawRectangle(
@@ -353,7 +357,7 @@ while true do
                 CELL_PIXELS - 1,
                 CELL_PIXELS - 1,
                 0xFF303030,
-                fillColor
+                0xFF000000
             )
 
         end
@@ -362,35 +366,15 @@ while true do
 
 
     -- ========================================================
-    -- DEBUG
+    -- DRAW CONFIRMED BOTTOM ROW
     --
-    -- Show detected top and bottom row addresses.
+    -- For now this is the only row for which we have a
+    -- confirmed memory mapping.
     -- ========================================================
 
-    local debugY =
-        gridY
-        + GRID_HEIGHT * CELL_PIXELS
-        + 3
+    local bottomRow =
+        GRID_HEIGHT - 1
 
-
-    gui.pixelText(
-        panelX + 1,
-        debugY,
-        string.format(
-            "TOP:%04X BOT:%04X",
-            rowBases[1],
-            rowBases[GRID_HEIGHT]
-        ),
-        0xFFFFFFFF,
-        0xFF000000
-    )
-
-
-    -- ========================================================
-    -- BOTTOM ROW VERIFY
-    -- ========================================================
-
-    local verify = ""
 
     for column = 0, GRID_WIDTH - 1 do
 
@@ -398,26 +382,43 @@ while true do
             BOTTOM_ROW_BASE
             + column * CELL_SIZE
 
+
         local value =
             readByte(address)
 
-        verify =
-            verify
-            .. string.format(
-                "%02X ",
-                value
-            )
+
+        local color =
+            0xFF000000
+
+
+        if isSnake(value) then
+
+            color =
+                0xFF00FF40
+
+        end
+
+
+        local x =
+            gridX
+            + column * CELL_PIXELS
+
+
+        local y =
+            gridY
+            + bottomRow * CELL_PIXELS
+
+
+        gui.drawRectangle(
+            x,
+            y,
+            CELL_PIXELS - 1,
+            CELL_PIXELS - 1,
+            0xFF303030,
+            color
+        )
 
     end
-
-
-    gui.pixelText(
-        panelX + 1,
-        debugY + 9,
-        verify,
-        0xFF00FF40,
-        0xFF000000
-    )
 
 
     emu.frameadvance()
