@@ -1,28 +1,30 @@
 -- BizHawk Lua
--- First Snake Local Memory Diagnostic
+-- 12x26 First-Snake Visualizer
 --
--- Known current snake section:
+-- Confirmed memory geometry:
 --
---   0x0FA0 = 28 08
---   0x0FA2 = 25 08
---   0x0FA4 = 2A 08
+--   Horizontal tile step = 0x02
+--   Vertical tile step   = 0x40
 --
--- The visible snake has additional vertical segments.
+-- Confirmed / strongly identified snake #1 tile IDs:
 --
--- Goal:
---   Find those segments WITHOUT making another grid-layout
---   assumption.
+--   23
+--   24
+--   25
+--   27
+--   28
+--   2A
+--   2D
+--   2E
 --
 -- DISPLAY:
---   Existing 12x26 visualization
---   Green = confirmed snake IDs
---   Black = everything else
+--
+--   Black = empty / everything else
+--   Green = snake #1
 --
 -- CONSOLE:
---   Dumps interesting XX 08 pairs in the local memory region.
 --
--- Confirmed IDs:
---   23 25 28 2A 2D
+--   Only logs snake layout when it changes.
 
 local DOMAIN = "WRAM"
 
@@ -39,75 +41,71 @@ local PANEL_MARGIN = 8
 
 
 -- ============================================================
--- CURRENT VISUALIZATION MAPPING
+-- MEMORY GEOMETRY
 -- ============================================================
 
-local GRID_BASE = 0x049E
-
-local CELL_SIZE  = 2
-local ROW_STRIDE = 0x80
+local COLUMN_STRIDE = 0x02
+local ROW_STRIDE    = 0x40
 
 
 -- ============================================================
--- LOCAL MEMORY SEARCH
+-- GRID BASE
 --
--- This deliberately ignores the assumed grid mapping.
+-- We know from the current frame:
+--
+--   row? col? = 0x0FA0
+--
+-- The previous diagnostics were offset because they used
+-- 0x80 as the row stride.
+--
+-- From the original dump, playable rows repeat on 0x40
+-- boundaries.
+--
+-- Start of first playable interior row:
+--
+--   0x0A82
+--
+-- We'll use this directly and validate against the six-tile
+-- shape.
 -- ============================================================
 
-local SEARCH_START = 0x0E80
-local SEARCH_END   = 0x0FFF
+local GRID_BASE = 0x0A82
 
 
 -- ============================================================
--- TILE DATA
+-- TILE FORMAT
 -- ============================================================
 
 local TILE_ATTRIBUTE = 0x08
 
 
+-- ============================================================
+-- FIRST SNAKE TILE IDS
+-- ============================================================
+
 local SNAKE_TILES = {
 
     [0x23] = true,
 
+    [0x24] = true,
+
     [0x25] = true,
+
+    [0x27] = true,
 
     [0x28] = true,
 
     [0x2A] = true,
 
-    [0x2D] = true
+    [0x2D] = true,
 
-}
-
-
--- Board/background tiles we already recognize.
-local IGNORE_TILES = {
-
-    [0x00] = true,
-
-    [0x01] = true,
-
-    [0xF4] = true,
-
-    [0xF5] = true,
-
-    [0xF6] = true,
-
-    [0xF7] = true,
-
-    [0xFC] = true,
-
-    [0xFD] = true,
-
-    [0xFE] = true,
-
-    [0xFF] = true
+    [0x2E] = true
 
 }
 
 
 -- ============================================================
--- PANEL
+-- DISPLAY
 -- ============================================================
 
 local PANEL_WIDTH =
@@ -136,7 +134,7 @@ local previousSignature = ""
 
 
 -- ============================================================
--- MEMORY
+-- MEMORY HELPERS
 -- ============================================================
 
 local function readByte(address)
@@ -149,63 +147,96 @@ local function readByte(address)
 end
 
 
-local function getGridAddress(row, column)
+local function getCellAddress(row, column)
 
     return
         GRID_BASE +
         row * ROW_STRIDE +
-        column * CELL_SIZE
+        column * COLUMN_STRIDE
+
+end
+
+
+local function readCell(row, column)
+
+    local address =
+        getCellAddress(
+            row,
+            column
+        )
+
+
+    local tile =
+        readByte(address)
+
+
+    local attribute =
+        readByte(address + 1)
+
+
+    return tile, attribute, address
 
 end
 
 
 -- ============================================================
--- LOCAL MEMORY SCAN
---
--- Scan every two bytes for:
---
---     XX 08
---
--- Ignore known empty/border values.
+-- CLASSIFICATION
 -- ============================================================
 
-local function scanLocalMemory()
+local function isSnakeTile(tile, attribute)
 
-    local results = {}
+    return
+        attribute == TILE_ATTRIBUTE and
+        SNAKE_TILES[tile] == true
 
-
-    for address = SEARCH_START, SEARCH_END, 2 do
-
-        local tile =
-            readByte(address)
+end
 
 
-        local attribute =
-            readByte(address + 1)
+-- ============================================================
+-- FIND SNAKE
+-- ============================================================
+
+local function findSnakeCells()
+
+    local matches = {}
 
 
-        if
-            attribute == TILE_ATTRIBUTE and
-            not IGNORE_TILES[tile]
-        then
+    for row = 0, GRID_HEIGHT - 1 do
 
-            results[#results + 1] = {
+        for column = 0, GRID_WIDTH - 1 do
 
-                address = address,
+            local tile, attribute, address =
+                readCell(
+                    row,
+                    column
+                )
 
-                tile = tile,
 
-                confirmed =
-                    SNAKE_TILES[tile] == true
+            if isSnakeTile(
+                tile,
+                attribute
+            ) then
 
-            }
+                matches[#matches + 1] = {
+
+                    row = row,
+
+                    column = column,
+
+                    tile = tile,
+
+                    address = address
+
+                }
+
+            end
 
         end
 
     end
 
 
-    return results
+    return matches
 
 end
 
@@ -214,22 +245,23 @@ end
 -- SIGNATURE
 -- ============================================================
 
-local function buildSignature(results)
+local function buildSignature(matches)
 
     local parts = {}
 
 
-    for i = 1, #results do
+    for i = 1, #matches do
 
-        local result =
-            results[i]
+        local match =
+            matches[i]
 
 
         parts[#parts + 1] =
             string.format(
-                "%04X:%02X",
-                result.address,
-                result.tile
+                "%02d:%02d:%02X",
+                match.row,
+                match.column,
+                match.tile
             )
 
     end
@@ -244,14 +276,14 @@ end
 
 
 -- ============================================================
--- CONSOLE
+-- CONSOLE LOG
 -- ============================================================
 
-local function logResults(results)
+local function logMatches(matches)
 
     local signature =
         buildSignature(
-            results
+            matches
         )
 
 
@@ -265,40 +297,26 @@ local function logResults(results)
 
 
     console.log(
-        "========== LOCAL MEMORY =========="
-    )
-
-
-    console.log(
         string.format(
-            "Interesting XX 08 pairs: %d",
-            #results
+            "Snake cells: %d",
+            #matches
         )
     )
 
 
-    for i = 1, #results do
+    for i = 1, #matches do
 
-        local result =
-            results[i]
-
-
-        local marker = "?"
-
-
-        if result.confirmed then
-
-            marker = "*"
-
-        end
+        local match =
+            matches[i]
 
 
         console.log(
             string.format(
-                "%s 0x%04X = %02X 08",
-                marker,
-                result.address,
-                result.tile
+                "  row=%02d col=%02d addr=0x%04X tile=%02X",
+                match.row,
+                match.column,
+                match.address,
+                match.tile
             )
         )
 
@@ -306,17 +324,7 @@ local function logResults(results)
 
 
     console.log(
-        "* = confirmed snake ID"
-    )
-
-
-    console.log(
-        "? = unknown candidate"
-    )
-
-
-    console.log(
-        "=================================="
+        "--------------------------------"
     )
 
 end
@@ -328,48 +336,61 @@ end
 
 console.clear()
 
-console.log(
-    "First-snake local memory diagnostic"
-)
 
 console.log(
-    "Scanning 0x0E80-0x0FFF"
+    "First-snake visualizer"
 )
 
-console.log(
-    "Known horizontal section:"
-)
 
 console.log(
-    "0x0FA0=28, 0x0FA2=25, 0x0FA4=2A"
+    "Horizontal stride = 0x02"
 )
 
+
 console.log(
-    "----------------------------------"
+    "Vertical stride = 0x40"
+)
+
+
+console.log(
+    "Snake IDs = 23 24 25 27 28 2A 2D 2E"
+)
+
+
+console.log(
+    string.format(
+        "Grid base = 0x%04X",
+        GRID_BASE
+    )
+)
+
+
+console.log(
+    "--------------------------------"
 )
 
 
 -- ============================================================
--- MAIN
+-- MAIN LOOP
 -- ============================================================
 
 while true do
 
     -- ========================================================
-    -- RAW LOCAL SCAN
+    -- DETECT SNAKE
     -- ========================================================
 
-    local results =
-        scanLocalMemory()
+    local matches =
+        findSnakeCells()
 
 
-    logResults(
-        results
+    logMatches(
+        matches
     )
 
 
     -- ========================================================
-    -- VISUALIZATION
+    -- PANEL
     -- ========================================================
 
     local panelX =
@@ -385,7 +406,10 @@ while true do
         PANEL_MARGIN
 
 
-    -- Background
+    -- ========================================================
+    -- BACKGROUND
+    -- ========================================================
+
     gui.drawRectangle(
         panelX,
         0,
@@ -404,29 +428,21 @@ while true do
 
         for column = 0, GRID_WIDTH - 1 do
 
-            local address =
-                getGridAddress(
+            local tile, attribute, address =
+                readCell(
                     row,
                     column
                 )
-
-
-            local tile =
-                readByte(address)
-
-
-            local attribute =
-                readByte(address + 1)
 
 
             local color =
                 0xFF000000
 
 
-            if
-                attribute == TILE_ATTRIBUTE and
-                SNAKE_TILES[tile]
-            then
+            if isSnakeTile(
+                tile,
+                attribute
+            ) then
 
                 color =
                     0xFF00FF40
