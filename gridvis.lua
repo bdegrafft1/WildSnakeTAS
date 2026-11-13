@@ -1,41 +1,42 @@
 -- BizHawk Lua
 -- 12x26 Multi-Color Snake Visualizer
 --
--- Memory structure discovered so far:
+-- Current memory model:
 --
---   [tile ID] [attribute / palette]
+--   [tile ID] [attribute]
 --
--- Likely palettes from the supplied same-frame dump:
+-- Grid geometry:
 --
---   XX 08 = blue/orange snake
---   XX 0C = cyan snake
---   XX 19 = yellow snake
+--   horizontal = +0x02
+--   vertical   = +0x40
 --
--- Empty board cell:
+-- Color classification based on the mature same-frame dump:
 --
---   01 08
+--   Cyan:
+--       attribute 0C
+--       tile family 54-5E
 --
--- Memory geometry:
+--   Yellow:
+--       attribute 08
+--       tile family 33-3D
 --
---   horizontal neighbor = +/- 0x02
---   vertical neighbor   = +/- 0x40
+--   Orange:
+--       attribute 08
+--       tile family 44-50
 --
--- DISPLAY:
+--   Blue:
+--       attribute 08
+--       tile family 12-32
 --
---   Black  = empty
---   Blue   = attribute 08
---   Cyan   = attribute 0C
---   Yellow = attribute 19
+-- Isolated cells are removed WITHIN each color family.
 --
--- Isolated candidate values are ignored.
--- All connected snake clusters are drawn.
--- Debug output goes to the Lua console only.
+-- Debug goes to console only.
 
 local DOMAIN = "WRAM"
 
 
 -- ============================================================
--- OUTPUT GRID
+-- GRID
 -- ============================================================
 
 local GRID_WIDTH  = 12
@@ -46,7 +47,7 @@ local MARGIN = 4
 
 
 -- ============================================================
--- MEMORY RANGE
+-- MEMORY
 -- ============================================================
 
 local SEARCH_START = 0x0A80
@@ -57,150 +58,127 @@ local Y_STEP = 0x40
 
 
 -- ============================================================
--- PLAYFIELD CALIBRATION
---
--- Keep the value that looked better in the last test.
---
--- Raw column 16 becomes output column 0.
---
--- Smaller value moves output right.
--- Larger value moves output left.
+-- GRID CALIBRATION
 -- ============================================================
 
 local RAW_X_ORIGIN = 16
-
 local RAW_Y_ORIGIN = 0
 
 
 -- ============================================================
--- PALETTE / ATTRIBUTE COLORS
---
--- ARGB format:
---
---   0xAA RR GG BB
+-- COLORS
 -- ============================================================
 
-local ATTRIBUTE_COLORS = {
+local COLOR_BLUE =
+    0xFF2080FF
 
-    -- Blue snake.
-    [0x08] = 0xFF2080FF,
+local COLOR_CYAN =
+    0xFF00FFFF
 
-    -- Cyan snake.
-    [0x0C] = 0xFF00FFFF,
+local COLOR_YELLOW =
+    0xFFFFFF00
 
-    -- Yellow snake.
-    [0x19] = 0xFFFFFF00
-
-}
+local COLOR_ORANGE =
+    0xFFFF8000
 
 
 -- ============================================================
--- EMPTY / STRUCTURAL TILE IDS
+-- CLASSIFICATION
 --
--- These values are known board, border, or empty graphics.
--- They must not become snake cells merely because an attribute
--- happens to match.
+-- Returns:
+--
+--   name
+--   color
+--
+-- or nil if the pair isn't currently recognized as snake data.
 -- ============================================================
 
-local IGNORED_TILES = {
+local function classifyTile(tile, attribute)
 
-    [0x00] = true,
-    [0x01] = true,
+    -- --------------------------------------------------------
+    -- CYAN
+    -- --------------------------------------------------------
 
-    [0xF4] = true,
-    [0xF5] = true,
-    [0xF6] = true,
-    [0xF7] = true,
+    if
+        attribute == 0x0C and
+        tile >= 0x54 and
+        tile <= 0x5E
+    then
 
-    [0xFC] = true,
-    [0xFD] = true,
-    [0xFE] = true,
-    [0xFF] = true
-
-}
-
-
--- ============================================================
--- ATTRIBUTE-SPECIFIC TILE RANGES
---
--- The supplied dump shows different tile-ID families for
--- different palettes.
---
--- 08:
---   includes values such as 02, 05, 06, 09, 0F, 12, 16,
---   1B, 22-50, etc.
---
--- 0C:
---   includes 54, 55, 56, 57, 59, 5B, 5E.
---
--- 19:
---   includes the yellow snake sprite family.
---
--- Broad ranges are used, but connected-cluster filtering and
--- playfield clipping remove isolated unrelated values.
--- ============================================================
-
-local function isCandidateTile(tile, attribute)
-
-    if ATTRIBUTE_COLORS[attribute] == nil then
-        return false
-    end
-
-
-    if IGNORED_TILES[tile] then
-        return false
-    end
-
-
-    -- Cyan family observed in the dump.
-    if attribute == 0x0C then
-
-        return
-            tile >= 0x50 and
-            tile <= 0x5F
+        return "cyan", COLOR_CYAN
 
     end
 
 
-    -- Yellow family observed with attribute 19.
-    if attribute == 0x19 then
+    -- Remaining observed families use attribute 08.
+    if attribute ~= 0x08 then
+        return nil, nil
+    end
 
-        return
-            tile >= 0x10 and
-            tile <= 0x5F
+
+    -- --------------------------------------------------------
+    -- YELLOW
+    --
+    -- Strong sequence at the bottom:
+    --
+    -- 3D 35 35 35 35 35 35 33
+    -- --------------------------------------------------------
+
+    if
+        tile >= 0x33 and
+        tile <= 0x3D
+    then
+
+        return "yellow", COLOR_YELLOW
 
     end
 
 
-    -- Blue/orange family.
-    if attribute == 0x08 then
+    -- --------------------------------------------------------
+    -- ORANGE
+    --
+    -- Repeated mature-board values:
+    --
+    -- 44 45 46 47 4A 50
+    -- --------------------------------------------------------
 
-        return
-            tile >= 0x02 and
-            tile <= 0x5F
+    if
+        tile >= 0x44 and
+        tile <= 0x50
+    then
+
+        return "orange", COLOR_ORANGE
 
     end
 
 
-    return false
+    -- --------------------------------------------------------
+    -- BLUE
+    --
+    -- Remaining observed first-snake / blue-family values.
+    --
+    -- Examples:
+    --
+    -- 12 16 1B 23 25 26 27 28 29 2E 30 32
+    -- --------------------------------------------------------
+
+    if
+        tile >= 0x12 and
+        tile <= 0x32
+    then
+
+        return "blue", COLOR_BLUE
+
+    end
+
+
+    return nil, nil
 
 end
 
 
 -- ============================================================
--- CLUSTER FILTERING
---
--- Ignore single coincidental matches.
---
--- A minimum of two connected tiles allows short visible
--- sections while eliminating the stuck isolated pixels.
--- ============================================================
-
-local MIN_CLUSTER_SIZE = 2
-
-
--- ============================================================
--- PANEL SIZE
+-- PANEL
 -- ============================================================
 
 local PANEL_WIDTH =
@@ -228,7 +206,7 @@ local previousSignature = ""
 
 
 -- ============================================================
--- MEMORY HELPERS
+-- MEMORY
 -- ============================================================
 
 local function readByte(address)
@@ -255,7 +233,7 @@ end
 
 
 -- ============================================================
--- ADDRESS COORDINATES
+-- COORDINATES
 -- ============================================================
 
 local function rawCoordinates(address)
@@ -264,19 +242,19 @@ local function rawCoordinates(address)
         address - SEARCH_START
 
 
-    local rawRow =
+    local row =
         math.floor(
             offset / Y_STEP
         )
 
 
-    local rawColumn =
+    local column =
         math.floor(
             (offset % Y_STEP) / X_STEP
         )
 
 
-    return rawRow, rawColumn
+    return row, column
 
 end
 
@@ -287,45 +265,20 @@ local function gridCoordinates(address)
         rawCoordinates(address)
 
 
-    local gridRow =
-        rawRow -
-        RAW_Y_ORIGIN
-
-
-    local gridColumn =
-        rawColumn -
-        RAW_X_ORIGIN
-
-
-    return gridRow, gridColumn
+    return
+        rawRow - RAW_Y_ORIGIN,
+        rawColumn - RAW_X_ORIGIN
 
 end
 
 
 -- ============================================================
--- SCAN CANDIDATE CELLS
---
--- lookup is indexed by:
---
---   attribute -> address -> candidate
---
--- Keeping palettes separate prevents adjacent snakes of
--- different colors from merging into one cluster.
+-- SCAN
 -- ============================================================
 
-local function scanCandidates()
+local function scanCells()
 
-    local candidatesByAttribute = {}
-
-    local lookupByAttribute = {}
-
-
-    for attribute, color in pairs(ATTRIBUTE_COLORS) do
-
-        candidatesByAttribute[attribute] = {}
-        lookupByAttribute[attribute] = {}
-
-    end
+    local cells = {}
 
 
     for address = SEARCH_START, SEARCH_END - 1, 2 do
@@ -334,15 +287,21 @@ local function scanCandidates()
             readTile(address)
 
 
-        if isCandidateTile(tile, attribute) then
+        local family, color =
+            classifyTile(
+                tile,
+                attribute
+            )
+
+
+        if family ~= nil then
 
             local row, column =
-                gridCoordinates(address)
+                gridCoordinates(
+                    address
+                )
 
 
-            -- Only retain values inside the visible 12x26
-            -- playfield. This removes unrelated data elsewhere
-            -- in the underlying 32-wide memory row.
             if
                 row >= 0 and
                 row < GRID_HEIGHT and
@@ -350,7 +309,7 @@ local function scanCandidates()
                 column < GRID_WIDTH
             then
 
-                local entry = {
+                cells[#cells + 1] = {
 
                     address = address,
 
@@ -358,28 +317,16 @@ local function scanCandidates()
 
                     attribute = attribute,
 
+                    family = family,
+
+                    color = color,
+
                     row = row,
 
                     column = column
 
                 }
 
-
-                local candidates =
-                    candidatesByAttribute[attribute]
-
-
-                local lookup =
-                    lookupByAttribute[attribute]
-
-
-                candidates[#candidates + 1] =
-                    entry
-
-
-                lookup[address] =
-                    entry
-
             end
 
         end
@@ -387,213 +334,144 @@ local function scanCandidates()
     end
 
 
-    return
-        candidatesByAttribute,
-        lookupByAttribute
+    return cells
 
 end
 
 
 -- ============================================================
--- BUILD CLUSTERS FOR ONE COLOR
+-- FILTER ISOLATED CELLS
+--
+-- Important:
+--
+-- Connectivity is checked ONLY against cells of the same
+-- color family.
+--
+-- Therefore touching blue/yellow/orange snakes don't merge.
 -- ============================================================
 
-local function buildClusters(candidates, lookup)
+local function filterConnected(cells)
 
-    local clusters = {}
-
-    local visited = {}
+    local lookup = {}
 
 
-    for i = 1, #candidates do
+    for i = 1, #cells do
 
-        local start =
-            candidates[i]
-
-
-        if not visited[start.address] then
-
-            local cluster = {}
-
-            local queue = {
-                start.address
-            }
-
-            local queueIndex = 1
+        local cell =
+            cells[i]
 
 
-            visited[start.address] =
-                true
-
-
-            while queueIndex <= #queue do
-
-                local address =
-                    queue[queueIndex]
-
-
-                queueIndex =
-                    queueIndex + 1
-
-
-                local entry =
-                    lookup[address]
-
-
-                if entry ~= nil then
-
-                    cluster[#cluster + 1] =
-                        entry
-
-
-                    local neighbors = {
-
-                        address - X_STEP,
-                        address + X_STEP,
-
-                        address - Y_STEP,
-                        address + Y_STEP
-
-                    }
-
-
-                    for n = 1, #neighbors do
-
-                        local neighbor =
-                            neighbors[n]
-
-
-                        if
-                            lookup[neighbor] ~= nil and
-                            not visited[neighbor]
-                        then
-
-                            visited[neighbor] =
-                                true
-
-
-                            queue[#queue + 1] =
-                                neighbor
-
-                        end
-
-                    end
-
-                end
-
-            end
-
-
-            if #cluster >= MIN_CLUSTER_SIZE then
-
-                clusters[#clusters + 1] =
-                    cluster
-
-            end
-
-        end
-
-    end
-
-
-    return clusters
-
-end
-
-
--- ============================================================
--- FIND ALL COLORED SNAKES
--- ============================================================
-
-local function findAllClusters()
-
-    local candidatesByAttribute,
-          lookupByAttribute =
-        scanCandidates()
-
-
-    local allClusters = {}
-
-
-    for attribute, color in pairs(ATTRIBUTE_COLORS) do
-
-        local candidates =
-            candidatesByAttribute[attribute]
-
-
-        local lookup =
-            lookupByAttribute[attribute]
-
-
-        local clusters =
-            buildClusters(
-                candidates,
-                lookup
+        local key =
+            cell.family ..
+            ":" ..
+            string.format(
+                "%04X",
+                cell.address
             )
 
 
-        for i = 1, #clusters do
+        lookup[key] =
+            true
 
-            allClusters[#allClusters + 1] = {
+    end
 
-                attribute = attribute,
 
-                color = color,
+    local output = {}
 
-                cells = clusters[i]
 
-            }
+    for i = 1, #cells do
+
+        local cell =
+            cells[i]
+
+
+        local neighbours = {
+
+            cell.address - X_STEP,
+            cell.address + X_STEP,
+
+            cell.address - Y_STEP,
+            cell.address + Y_STEP
+
+        }
+
+
+        local connected =
+            false
+
+
+        for n = 1, #neighbours do
+
+            local key =
+                cell.family ..
+                ":" ..
+                string.format(
+                    "%04X",
+                    neighbours[n]
+                )
+
+
+            if lookup[key] then
+
+                connected =
+                    true
+
+                break
+
+            end
+
+        end
+
+
+        if connected then
+
+            output[#output + 1] =
+                cell
 
         end
 
     end
 
 
-    return allClusters
+    return output
 
 end
 
 
 -- ============================================================
--- CONSOLE LOGGING
+-- CONSOLE
 -- ============================================================
 
-local function logClusters(clusters)
+local function logCells(cells)
 
-    local parts = {}
-
-
-    for i = 1, #clusters do
-
-        local cluster =
-            clusters[i]
+    local pieces = {}
 
 
-        for c = 1, #cluster.cells do
+    for i = 1, #cells do
 
-            local cell =
-                cluster.cells[c]
+        local cell =
+            cells[i]
 
 
-            parts[#parts + 1] =
-                string.format(
-                    "%02X:%04X:%02X",
-                    cluster.attribute,
-                    cell.address,
-                    cell.tile
-                )
-
-        end
+        pieces[#pieces + 1] =
+            string.format(
+                "%s:%04X:%02X",
+                cell.family,
+                cell.address,
+                cell.tile
+            )
 
     end
 
 
-    table.sort(parts)
+    table.sort(
+        pieces
+    )
 
 
     local signature =
         table.concat(
-            parts,
+            pieces,
             "|"
         )
 
@@ -607,47 +485,59 @@ local function logClusters(clusters)
         signature
 
 
+    local counts = {
+
+        blue = 0,
+
+        cyan = 0,
+
+        yellow = 0,
+
+        orange = 0
+
+    }
+
+
+    for i = 1, #cells do
+
+        local family =
+            cells[i].family
+
+
+        counts[family] =
+            counts[family] + 1
+
+    end
+
+
     console.log(
         string.format(
-            "Colored clusters: %d",
-            #clusters
+            "blue=%d cyan=%d yellow=%d orange=%d",
+            counts.blue,
+            counts.cyan,
+            counts.yellow,
+            counts.orange
         )
     )
 
 
-    for i = 1, #clusters do
+    for i = 1, #cells do
 
-        local cluster =
-            clusters[i]
+        local cell =
+            cells[i]
 
 
         console.log(
             string.format(
-                "Cluster %d: attr=%02X cells=%d",
-                i,
-                cluster.attribute,
-                #cluster.cells
+                "%-6s row=%02d col=%02d addr=0x%04X tile=%02X attr=%02X",
+                cell.family,
+                cell.row,
+                cell.column,
+                cell.address,
+                cell.tile,
+                cell.attribute
             )
         )
-
-
-        for c = 1, #cluster.cells do
-
-            local cell =
-                cluster.cells[c]
-
-
-            console.log(
-                string.format(
-                    "  row=%02d col=%02d addr=0x%04X tile=%02X",
-                    cell.row,
-                    cell.column,
-                    cell.address,
-                    cell.tile
-                )
-            )
-
-        end
 
     end
 
@@ -672,30 +562,30 @@ console.log(
 
 
 console.log(
+    "cyan   = attr 0C, tiles 54-5E"
+)
+
+
+console.log(
+    "yellow = attr 08, tiles 33-3D"
+)
+
+
+console.log(
+    "orange = attr 08, tiles 44-50"
+)
+
+
+console.log(
+    "blue   = attr 08, tiles 12-32"
+)
+
+
+console.log(
     string.format(
         "Raw X origin: %d",
         RAW_X_ORIGIN
     )
-)
-
-
-console.log(
-    "08 = blue"
-)
-
-
-console.log(
-    "0C = cyan"
-)
-
-
-console.log(
-    "19 = yellow"
-)
-
-
-console.log(
-    "Isolated matches ignored"
 )
 
 
@@ -711,20 +601,26 @@ console.log(
 while true do
 
     -- ========================================================
-    -- DETECT ALL COLORED CLUSTERS
+    -- READ GRID
     -- ========================================================
 
-    local clusters =
-        findAllClusters()
+    local scanned =
+        scanCells()
 
 
-    logClusters(
-        clusters
+    local cells =
+        filterConnected(
+            scanned
+        )
+
+
+    logCells(
+        cells
     )
 
 
     -- ========================================================
-    -- PANEL POSITION
+    -- PANEL
     -- ========================================================
 
     local panelX =
@@ -741,7 +637,7 @@ while true do
 
 
     -- ========================================================
-    -- PANEL BACKGROUND
+    -- BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
@@ -755,7 +651,7 @@ while true do
 
 
     -- ========================================================
-    -- 12x26 BLACK GRID
+    -- BLACK 12x26 GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
@@ -787,41 +683,33 @@ while true do
 
 
     -- ========================================================
-    -- DRAW ALL COLORED CLUSTERS
+    -- COLORED SNAKE CELLS
     -- ========================================================
 
-    for i = 1, #clusters do
+    for i = 1, #cells do
 
-        local cluster =
-            clusters[i]
-
-
-        for c = 1, #cluster.cells do
-
-            local cell =
-                cluster.cells[c]
+        local cell =
+            cells[i]
 
 
-            local x =
-                gridX +
-                cell.column * CELL_PIXELS
+        local x =
+            gridX +
+            cell.column * CELL_PIXELS
 
 
-            local y =
-                gridY +
-                cell.row * CELL_PIXELS
+        local y =
+            gridY +
+            cell.row * CELL_PIXELS
 
 
-            gui.drawRectangle(
-                x,
-                y,
-                CELL_PIXELS - 1,
-                CELL_PIXELS - 1,
-                0xFFFFFFFF,
-                cluster.color
-            )
-
-        end
+        gui.drawRectangle(
+            x,
+            y,
+            CELL_PIXELS - 1,
+            CELL_PIXELS - 1,
+            0xFFFFFFFF,
+            cell.color
+        )
 
     end
 
