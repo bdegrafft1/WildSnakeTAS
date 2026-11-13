@@ -1,69 +1,60 @@
 -- BizHawk Lua
 -- 12x26 Snake Grid Visualizer
 --
--- Phase 1
+-- CURRENT GOAL:
+-- Prove the bottom-row alignment using the snake sequence
+-- that we have actually found in live WRAM.
 --
--- Black = empty / unknown
--- Green = known snake sprite
+-- Confirmed live WRAM:
 --
--- Confirmed from live memory:
+--   0x10E8 = 2D  head
+--   0x10EA = 25  body
+--   0x10EC = 25  body
+--   0x10EE = 25  body
+--   0x10F0 = 25  body
+--   0x10F2 = 23  tail
 --
---   10E8 = 2D   head
---   10EA = 25   body
---   10EC = 25   body
---   10EE = 25   body
---   10F0 = 25   body
---   10F2 = 23   tail
+-- The snake visually occupies:
 --
--- The visible snake occupies the final 6 cells
--- of the bottom row.
+--   row 25
+--   columns 6,7,8,9,10,11
+--
+-- Therefore the bottom row begins:
+--
+--   0x10E8 - (6 * 2)
+--   = 0x10DC
+--
+-- IMPORTANT:
+-- We are NOT assuming a row stride yet.
+-- Only the confirmed bottom row is reading actual WRAM.
 
 local DOMAIN = "WRAM"
 
 
 -- ============================================================
--- GRID
+-- GRID SIZE
 -- ============================================================
 
 local GRID_WIDTH  = 12
 local GRID_HEIGHT = 26
 
-local CELL_SIZE  = 2
-local ROW_STRIDE = 0x40
+local CELL_SIZE = 2
 
 
 -- ============================================================
--- MEMORY MAPPING
+-- CONFIRMED MEMORY
 -- ============================================================
 
--- Confirmed snake head.
-local SNAKE_HEAD_ADDRESS = 0x10E8
-
--- Snake visually begins at column 6.
-local SNAKE_HEAD_COLUMN = 6
-
--- Calculate the beginning of the bottom row.
-local LAST_ROW_BASE =
-    SNAKE_HEAD_ADDRESS
-    - (SNAKE_HEAD_COLUMN * CELL_SIZE)
-
--- Calculate the beginning of row zero.
-local GRID_BASE =
-    LAST_ROW_BASE
-    - ((GRID_HEIGHT - 1) * ROW_STRIDE)
-
-
--- ============================================================
--- KNOWN SNAKE TILES
--- ============================================================
+local BOTTOM_ROW_BASE = 0x10DC
 
 local SNAKE_TILES = {
 
-    [0x2D] = true, -- right-facing head
+    [0x2D] = true, -- head
 
-    [0x25] = true, -- horizontal body
+    [0x25] = true, -- body
 
     [0x23] = true  -- tail
+
 }
 
 
@@ -81,11 +72,11 @@ local PANEL_WIDTH =
 local PANEL_HEIGHT =
     GRID_HEIGHT * CELL_PIXELS
     + PANEL_MARGIN * 2
-    + 18
+    + 30
 
 
 -- ============================================================
--- EXTRA SCREEN SPACE
+-- ADD SPACE TO RIGHT SIDE
 -- ============================================================
 
 client.SetGameExtraPadding(
@@ -97,25 +88,21 @@ client.SetGameExtraPadding(
 
 
 -- ============================================================
--- MEMORY FUNCTIONS
+-- HELPERS
 -- ============================================================
 
-local function getCellAddress(row, column)
+local function isSnakeTile(tile)
 
-    return GRID_BASE
-        + row * ROW_STRIDE
-        + column * CELL_SIZE
+    return SNAKE_TILES[tile] == true
 
 end
 
 
-local function readCell(row, column)
+local function readBottomCell(column)
 
     local address =
-        getCellAddress(
-            row,
-            column
-        )
+        BOTTOM_ROW_BASE
+        + column * CELL_SIZE
 
     local tile =
         memory.read_u8(
@@ -123,20 +110,7 @@ local function readCell(row, column)
             DOMAIN
         )
 
-    local attribute =
-        memory.read_u8(
-            address + 1,
-            DOMAIN
-        )
-
-    return tile, attribute, address
-
-end
-
-
-local function isSnakeTile(tile)
-
-    return SNAKE_TILES[tile] == true
+    return tile, address
 
 end
 
@@ -147,12 +121,16 @@ end
 
 while true do
 
-    -- Your working right-side panel location.
     local panelX =
         client.bufferwidth()
 
-    local panelY =
-        PANEL_MARGIN - 16
+    local panelY = 0
+
+    local gridX =
+        panelX + PANEL_MARGIN
+
+    local gridY =
+        PANEL_MARGIN
 
 
     -- ========================================================
@@ -170,61 +148,20 @@ while true do
 
 
     -- ========================================================
-    -- GRID TITLE
-    -- ========================================================
-
-    gui.pixelText(
-        panelX + PANEL_MARGIN,
-        panelY,
-        "Snake grid 12x26",
-        0xFFFFFFFF,
-        0xFF101010
-    )
-
-
-    local gridX =
-        panelX + PANEL_MARGIN
-
-    local gridY =
-        panelY + 14
-
-
-    -- ========================================================
-    -- DRAW GRID
+    -- DRAW EMPTY 12x26 GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
 
         for column = 0, GRID_WIDTH - 1 do
 
-            local tile, attribute, address =
-                readCell(
-                    row,
-                    column
-                )
-
-
             local x =
                 gridX
                 + column * CELL_PIXELS
 
-
             local y =
                 gridY
                 + row * CELL_PIXELS
-
-
-            local fillColor =
-                0xFF000000
-
-
-            if isSnakeTile(tile) then
-
-                fillColor =
-                    0xFF00C840
-
-            end
-
 
             gui.drawRectangle(
                 x,
@@ -232,7 +169,7 @@ while true do
                 CELL_PIXELS - 1,
                 CELL_PIXELS - 1,
                 0xFF303030,
-                fillColor
+                0xFF000000
             )
 
         end
@@ -241,22 +178,70 @@ while true do
 
 
     -- ========================================================
-    -- DEBUG: LAST ROW
+    -- DRAW CONFIRMED BOTTOM ROW
+    --
+    -- This explicitly reads:
+    --
+    -- column 0  = 10DC
+    -- column 1  = 10DE
+    -- column 2  = 10E0
+    -- column 3  = 10E2
+    -- column 4  = 10E4
+    -- column 5  = 10E6
+    -- column 6  = 10E8
+    -- column 7  = 10EA
+    -- column 8  = 10EC
+    -- column 9  = 10EE
+    -- column 10 = 10F0
+    -- column 11 = 10F2
     -- ========================================================
 
-    local debug = ""
+    local bottomRow =
+        GRID_HEIGHT - 1
+
+    local debugValues = ""
+
 
     for column = 0, GRID_WIDTH - 1 do
 
-        local tile, attribute, address =
-            readCell(
-                GRID_HEIGHT - 1,
-                column
-            )
+        local tile, address =
+            readBottomCell(column)
 
 
-        debug =
-            debug
+        local x =
+            gridX
+            + column * CELL_PIXELS
+
+
+        local y =
+            gridY
+            + bottomRow * CELL_PIXELS
+
+
+        local fillColor =
+            0xFF000000
+
+
+        if isSnakeTile(tile) then
+
+            fillColor =
+                0xFF00FF40
+
+        end
+
+
+        gui.drawRectangle(
+            x,
+            y,
+            CELL_PIXELS - 1,
+            CELL_PIXELS - 1,
+            0xFFFFFFFF,
+            fillColor
+        )
+
+
+        debugValues =
+            debugValues
             .. string.format(
                 "%02X ",
                 tile
@@ -265,31 +250,71 @@ while true do
     end
 
 
+    -- ========================================================
+    -- EXPECTED:
+    --
+    -- ?? ?? ?? ?? ?? ?? 2D 25 25 25 25 23
+    --
+    -- ========================================================
+
+    local debugY =
+        gridY
+        + GRID_HEIGHT * CELL_PIXELS
+        + 4
+
+
     gui.pixelText(
         panelX + 1,
-        gridY
-            + GRID_HEIGHT * CELL_PIXELS
-            + 3,
-        debug,
+        debugY,
+        debugValues,
         0xFFFFFFFF,
         0xFF000000
     )
 
 
     -- ========================================================
-    -- DEBUG: BASE ADDRESSES
+    -- DIRECTLY READ CONFIRMED SEQUENCE
+    --
+    -- This gives us a second independent check.
+    -- ========================================================
+
+    local verify = ""
+
+    for address = 0x10E8, 0x10F2, 2 do
+
+        local value =
+            memory.read_u8(
+                address,
+                DOMAIN
+            )
+
+        verify =
+            verify
+            .. string.format(
+                "%02X ",
+                value
+            )
+
+    end
+
+
+    gui.pixelText(
+        panelX + 1,
+        debugY + 9,
+        "SEQ: " .. verify,
+        0xFF00FF40,
+        0xFF000000
+    )
+
+
+    -- ========================================================
+    -- ADDRESS INFO
     -- ========================================================
 
     gui.pixelText(
         panelX + 1,
-        gridY
-            + GRID_HEIGHT * CELL_PIXELS
-            + 12,
-        string.format(
-            "BASE:%04X LAST:%04X",
-            GRID_BASE,
-            LAST_ROW_BASE
-        ),
+        debugY + 18,
+        "ROW: 10DC-10F2",
         0xFFAAAAAA,
         0xFF000000
     )
