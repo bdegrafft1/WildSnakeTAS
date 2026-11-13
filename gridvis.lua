@@ -1,34 +1,34 @@
 -- BizHawk Lua
 -- 12x26 Multi-Color Snake Visualizer
 --
--- Current memory model:
---
---   [tile ID] [attribute]
---
 -- Grid geometry:
+--   horizontal = 0x02 bytes
+--   vertical   = 0x40 bytes
 --
---   horizontal = +0x02
---   vertical   = +0x40
+-- Current sprite families:
 --
--- Color classification based on the mature same-frame dump:
+--   CYAN
+--     attr 0C
+--     tiles 54-5E
 --
---   Cyan:
---       attribute 0C
---       tile family 54-5E
+--   YELLOW
+--     attr 08
+--     tiles 33-3D
 --
---   Yellow:
---       attribute 08
---       tile family 33-3D
+--   ORANGE
+--     attr 08
+--     tiles 44-50
 --
---   Orange:
---       attribute 08
---       tile family 44-50
+--   BLUE
+--     attr 08
+--     tiles 12-32
 --
---   Blue:
---       attribute 08
---       tile family 12-32
---
--- Isolated cells are removed WITHIN each color family.
+-- Display:
+--   black  = empty
+--   cyan   = cyan snake
+--   yellow = yellow snake
+--   orange = orange snake
+--   blue   = blue snake
 --
 -- Debug goes to console only.
 
@@ -69,111 +69,71 @@ local RAW_Y_ORIGIN = 0
 -- COLORS
 -- ============================================================
 
-local COLOR_BLUE =
-    0xFF2080FF
-
-local COLOR_CYAN =
-    0xFF00FFFF
-
-local COLOR_YELLOW =
-    0xFFFFFF00
-
-local COLOR_ORANGE =
-    0xFFFF8000
+local COLOR_BLUE   = 0xFF2080FF
+local COLOR_CYAN   = 0xFF00FFFF
+local COLOR_YELLOW = 0xFFFFFF00
+local COLOR_ORANGE = 0xFFFF8000
 
 
 -- ============================================================
--- CLASSIFICATION
+-- MINIMUM CONNECTED COMPONENT SIZE
 --
--- Returns:
---
---   name
---   color
---
--- or nil if the pair isn't currently recognized as snake data.
+-- Single matching bytes are ignored.
+-- ============================================================
+
+local MIN_COMPONENT_SIZE = 2
+
+
+-- ============================================================
+-- TILE CLASSIFICATION
 -- ============================================================
 
 local function classifyTile(tile, attribute)
 
-    -- --------------------------------------------------------
-    -- CYAN
-    -- --------------------------------------------------------
-
+    -- Cyan family
     if
         attribute == 0x0C and
         tile >= 0x54 and
         tile <= 0x5E
     then
-
         return "cyan", COLOR_CYAN
-
     end
 
 
-    -- Remaining observed families use attribute 08.
+    -- Other currently identified snakes use attr 08.
     if attribute ~= 0x08 then
         return nil, nil
     end
 
 
-    -- --------------------------------------------------------
-    -- YELLOW
-    --
-    -- Strong sequence at the bottom:
-    --
-    -- 3D 35 35 35 35 35 35 33
-    -- --------------------------------------------------------
-
+    -- Yellow family
     if
         tile >= 0x33 and
         tile <= 0x3D
     then
-
         return "yellow", COLOR_YELLOW
-
     end
 
 
-    -- --------------------------------------------------------
-    -- ORANGE
-    --
-    -- Repeated mature-board values:
-    --
-    -- 44 45 46 47 4A 50
-    -- --------------------------------------------------------
-
+    -- Orange family
     if
         tile >= 0x44 and
         tile <= 0x50
     then
-
         return "orange", COLOR_ORANGE
-
     end
 
 
-    -- --------------------------------------------------------
-    -- BLUE
-    --
-    -- Remaining observed first-snake / blue-family values.
-    --
-    -- Examples:
-    --
-    -- 12 16 1B 23 25 26 27 28 29 2E 30 32
-    -- --------------------------------------------------------
-
+    -- Blue family
     if
         tile >= 0x12 and
         tile <= 0x32
     then
-
         return "blue", COLOR_BLUE
-
     end
 
 
     return nil, nil
-
 end
 
 
@@ -206,7 +166,7 @@ local previousSignature = ""
 
 
 -- ============================================================
--- MEMORY
+-- MEMORY HELPERS
 -- ============================================================
 
 local function readByte(address)
@@ -228,7 +188,6 @@ local function readTile(address)
         readByte(address + 1)
 
     return tile, attribute
-
 end
 
 
@@ -242,20 +201,19 @@ local function rawCoordinates(address)
         address - SEARCH_START
 
 
-    local row =
+    local rawRow =
         math.floor(
             offset / Y_STEP
         )
 
 
-    local column =
+    local rawColumn =
         math.floor(
             (offset % Y_STEP) / X_STEP
         )
 
 
-    return row, column
-
+    return rawRow, rawColumn
 end
 
 
@@ -268,15 +226,14 @@ local function gridCoordinates(address)
     return
         rawRow - RAW_Y_ORIGIN,
         rawColumn - RAW_X_ORIGIN
-
 end
 
 
 -- ============================================================
--- SCAN
+-- SCAN CANDIDATES
 -- ============================================================
 
-local function scanCells()
+local function scanCandidates()
 
     local cells = {}
 
@@ -297,9 +254,7 @@ local function scanCells()
         if family ~= nil then
 
             local row, column =
-                gridCoordinates(
-                    address
-                )
+                gridCoordinates(address)
 
 
             if
@@ -328,29 +283,21 @@ local function scanCells()
                 }
 
             end
-
         end
-
     end
 
 
     return cells
-
 end
 
 
 -- ============================================================
--- FILTER ISOLATED CELLS
+-- BUILD LOOKUP
 --
--- Important:
---
--- Connectivity is checked ONLY against cells of the same
--- color family.
---
--- Therefore touching blue/yellow/orange snakes don't merge.
+-- Separate lookup tables per color family.
 -- ============================================================
 
-local function filterConnected(cells)
+local function buildLookup(cells)
 
     local lookup = {}
 
@@ -361,80 +308,145 @@ local function filterConnected(cells)
             cells[i]
 
 
-        local key =
-            cell.family ..
-            ":" ..
-            string.format(
-                "%04X",
-                cell.address
-            )
+        if lookup[cell.family] == nil then
+            lookup[cell.family] = {}
+        end
 
 
-        lookup[key] =
-            true
-
+        lookup[cell.family][cell.address] =
+            cell
     end
 
 
-    local output = {}
+    return lookup
+end
 
 
-    for i = 1, #cells do
+-- ============================================================
+-- CONNECTED COMPONENT FOR ONE CELL
+-- ============================================================
+
+local function getComponent(startCell, familyLookup, visited)
+
+    local component = {}
+
+    local queue = {
+        startCell.address
+    }
+
+    local queueIndex = 1
+
+
+    visited[startCell.address] =
+        true
+
+
+    while queueIndex <= #queue do
+
+        local address =
+            queue[queueIndex]
+
+        queueIndex =
+            queueIndex + 1
+
 
         local cell =
-            cells[i]
+            familyLookup[address]
 
 
-        local neighbours = {
+        if cell ~= nil then
 
-            cell.address - X_STEP,
-            cell.address + X_STEP,
-
-            cell.address - Y_STEP,
-            cell.address + Y_STEP
-
-        }
-
-
-        local connected =
-            false
-
-
-        for n = 1, #neighbours do
-
-            local key =
-                cell.family ..
-                ":" ..
-                string.format(
-                    "%04X",
-                    neighbours[n]
-                )
-
-
-            if lookup[key] then
-
-                connected =
-                    true
-
-                break
-
-            end
-
-        end
-
-
-        if connected then
-
-            output[#output + 1] =
+            component[#component + 1] =
                 cell
 
-        end
 
+            local neighbours = {
+
+                address - X_STEP,
+                address + X_STEP,
+
+                address - Y_STEP,
+                address + Y_STEP
+
+            }
+
+
+            for n = 1, #neighbours do
+
+                local neighbour =
+                    neighbours[n]
+
+
+                if
+                    familyLookup[neighbour] ~= nil and
+                    not visited[neighbour]
+                then
+
+                    visited[neighbour] =
+                        true
+
+
+                    queue[#queue + 1] =
+                        neighbour
+                end
+            end
+        end
     end
 
 
-    return output
+    return component
+end
 
+
+-- ============================================================
+-- FILTER INTO VALID CONNECTED SNAKES
+-- ============================================================
+
+local function findComponents(cells)
+
+    local lookup =
+        buildLookup(cells)
+
+
+    local components = {}
+
+
+    for family, familyLookup in pairs(lookup) do
+
+        local visited = {}
+
+
+        for address, cell in pairs(familyLookup) do
+
+            if not visited[address] then
+
+                local component =
+                    getComponent(
+                        cell,
+                        familyLookup,
+                        visited
+                    )
+
+
+                if #component >= MIN_COMPONENT_SIZE then
+
+                    components[#components + 1] = {
+
+                        family = family,
+
+                        color = cell.color,
+
+                        cells = component
+
+                    }
+
+                end
+            end
+        end
+    end
+
+
+    return components
 end
 
 
@@ -442,36 +454,40 @@ end
 -- CONSOLE
 -- ============================================================
 
-local function logCells(cells)
+local function logComponents(components)
 
-    local pieces = {}
-
-
-    for i = 1, #cells do
-
-        local cell =
-            cells[i]
+    local parts = {}
 
 
-        pieces[#pieces + 1] =
-            string.format(
-                "%s:%04X:%02X",
-                cell.family,
-                cell.address,
-                cell.tile
-            )
+    for i = 1, #components do
 
+        local component =
+            components[i]
+
+
+        for c = 1, #component.cells do
+
+            local cell =
+                component.cells[c]
+
+
+            parts[#parts + 1] =
+                string.format(
+                    "%s:%04X:%02X",
+                    component.family,
+                    cell.address,
+                    cell.tile
+                )
+        end
     end
 
 
-    table.sort(
-        pieces
-    )
+    table.sort(parts)
 
 
     local signature =
         table.concat(
-            pieces,
+            parts,
             "|"
         )
 
@@ -485,67 +501,52 @@ local function logCells(cells)
         signature
 
 
-    local counts = {
-
-        blue = 0,
-
-        cyan = 0,
-
-        yellow = 0,
-
-        orange = 0
-
-    }
-
-
-    for i = 1, #cells do
-
-        local family =
-            cells[i].family
-
-
-        counts[family] =
-            counts[family] + 1
-
-    end
-
-
     console.log(
         string.format(
-            "blue=%d cyan=%d yellow=%d orange=%d",
-            counts.blue,
-            counts.cyan,
-            counts.yellow,
-            counts.orange
+            "Components: %d",
+            #components
         )
     )
 
 
-    for i = 1, #cells do
+    for i = 1, #components do
 
-        local cell =
-            cells[i]
+        local component =
+            components[i]
 
 
         console.log(
             string.format(
-                "%-6s row=%02d col=%02d addr=0x%04X tile=%02X attr=%02X",
-                cell.family,
-                cell.row,
-                cell.column,
-                cell.address,
-                cell.tile,
-                cell.attribute
+                "%s snake: %d cells",
+                component.family,
+                #component.cells
             )
         )
 
+
+        for c = 1, #component.cells do
+
+            local cell =
+                component.cells[c]
+
+
+            console.log(
+                string.format(
+                    "  row=%02d col=%02d addr=0x%04X tile=%02X attr=%02X",
+                    cell.row,
+                    cell.column,
+                    cell.address,
+                    cell.tile,
+                    cell.attribute
+                )
+            )
+        end
     end
 
 
     console.log(
         "--------------------------------"
     )
-
 end
 
 
@@ -562,22 +563,22 @@ console.log(
 
 
 console.log(
-    "cyan   = attr 0C, tiles 54-5E"
+    "cyan   : 54-5E / attr 0C"
 )
 
 
 console.log(
-    "yellow = attr 08, tiles 33-3D"
+    "yellow : 33-3D / attr 08"
 )
 
 
 console.log(
-    "orange = attr 08, tiles 44-50"
+    "orange : 44-50 / attr 08"
 )
 
 
 console.log(
-    "blue   = attr 08, tiles 12-32"
+    "blue   : 12-32 / attr 08"
 )
 
 
@@ -601,26 +602,26 @@ console.log(
 while true do
 
     -- ========================================================
-    -- READ GRID
+    -- DETECT
     -- ========================================================
 
-    local scanned =
-        scanCells()
+    local candidates =
+        scanCandidates()
 
 
-    local cells =
-        filterConnected(
-            scanned
+    local components =
+        findComponents(
+            candidates
         )
 
 
-    logCells(
-        cells
+    logComponents(
+        components
     )
 
 
     -- ========================================================
-    -- PANEL
+    -- PANEL POSITION
     -- ========================================================
 
     local panelX =
@@ -637,7 +638,7 @@ while true do
 
 
     -- ========================================================
-    -- BACKGROUND
+    -- PANEL BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
@@ -651,7 +652,7 @@ while true do
 
 
     -- ========================================================
-    -- BLACK 12x26 GRID
+    -- EMPTY 12x26 GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
@@ -678,42 +679,47 @@ while true do
             )
 
         end
-
     end
 
 
     -- ========================================================
-    -- COLORED SNAKE CELLS
+    -- DRAW EVERY VALID COMPONENT
     -- ========================================================
 
-    for i = 1, #cells do
+    for i = 1, #components do
 
-        local cell =
-            cells[i]
-
-
-        local x =
-            gridX +
-            cell.column * CELL_PIXELS
+        local component =
+            components[i]
 
 
-        local y =
-            gridY +
-            cell.row * CELL_PIXELS
+        for c = 1, #component.cells do
+
+            local cell =
+                component.cells[c]
 
 
-        gui.drawRectangle(
-            x,
-            y,
-            CELL_PIXELS - 1,
-            CELL_PIXELS - 1,
-            0xFFFFFFFF,
-            cell.color
-        )
+            local x =
+                gridX +
+                cell.column * CELL_PIXELS
 
+
+            local y =
+                gridY +
+                cell.row * CELL_PIXELS
+
+
+            gui.drawRectangle(
+                x,
+                y,
+                CELL_PIXELS - 1,
+                CELL_PIXELS - 1,
+                0xFFFFFFFF,
+                component.color
+            )
+
+        end
     end
 
 
     emu.frameadvance()
-
 end
