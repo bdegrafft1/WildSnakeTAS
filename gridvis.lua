@@ -367,4 +367,88 @@ while true do
 
         for column = 0, GRID_WIDTH - 1 do
 
-           
+            local x =
+                gridX
+                + column * CELL_PIXELS
+
+            local y =
+                gridY
+                + row * CELL_PIXELS
+
+
+            gui.drawRectangle(
+                x,
+                y,
+                CELL_PIXELS - 1,
+                CELL_PIXELS - 1,
+                0xFF303030,
+                0xFF000000
+            )
+
+        end
+
+    end
+
+
+    -- ========================================================
+    -- DRAW CURRENT SNAKE
+    -- ========================================================
+
+    if headAddress ~= nil then
+
+        local snakeRow, snakeColumn =
+            addressToGrid(
+                headAddress
+            )
+
+
+        -- Only draw valid integer coordinates.
+        if
+            snakeRow >= 0 and
+            snakeRow < GRID_HEIGHT and
+            snakeColumn >= 0 and
+            snakeColumn < GRID_WIDTH
+        then
+
+            for segment = 0, SNAKE_LENGTH - 1 do
+
+                local column =
+                    snakeColumn
+                    + segment
+
+
+                if
+                    column >= 0 and
+                    column < GRID_WIDTH
+                then
+
+                    local x =
+                        gridX
+                        + column * CELL_PIXELS
+
+                    local y =
+                        gridY
+                        + snakeRow * CELL_PIXELS
+
+
+                    gui.drawRectangle(
+                        x,
+                        y,
+                        CELL_PIXELS - 1,
+                        CELL_PIXELS - 1,
+                        0xFFFFFFFF,
+                        0xFF00FF40
+                    )
+
+                end
+
+            end
+
+        end
+
+    end
+
+
+    emu.frameadvance()
+
+end
