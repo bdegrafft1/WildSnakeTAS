@@ -1,31 +1,29 @@
 -- BizHawk Lua
 -- 12x26 Snake Grid Visualizer
 --
--- Phase 1
+-- CURRENT MAPPING FROM OBSERVATIONS:
 --
--- DISPLAY ONLY:
+--   Y + 1 grid cell = +0x80
+--   X + 1 grid cell = +0x04
+--
+-- Examples:
+--
+--   0x0CA8 -> 0x0D28 = +0x80
+--       down 1
+--
+--   0x0C24 -> 0x0CA8 = +0x84
+--       down 1 + right 1
+--
+-- CONFIRMED HORIZONTAL SNAKE SIGNATURE:
+--
+--   2D ?? 25 ?? 25 ?? 25 ?? 25 ?? 23
+--
+-- DISPLAY:
 --   Black = empty
---   Green = known snake
+--   Green = detected snake
 --
--- Debug information goes to the Lua console.
---
--- CONFIRMED FROM FALL TEST:
---
---   Vertical movement = +0x80 per grid row
---
--- Example:
---
---   0D24
---   0DA4
---   0E24
---   0EA4
---   0F24
---   0FA4
---   1024
---   10A4
---
--- The landed state appears to use a different representation,
--- so we map the falling playfield independently.
+-- DEBUG:
+--   Console only
 
 local DOMAIN = "WRAM"
 
@@ -42,15 +40,12 @@ local PANEL_MARGIN = 8
 
 
 -- ============================================================
--- MEMORY STRUCTURE
+-- MEMORY MAPPING
 -- ============================================================
 
--- Confirmed from the falling test.
 local ROW_STRIDE = 0x80
 
--- Tile/sprite values are separated by 2 bytes horizontally
--- within the observed horizontal snake.
-local COLUMN_STRIDE = 2
+local COLUMN_STRIDE = 0x04
 
 
 -- ============================================================
@@ -62,18 +57,37 @@ local END_ADDR   = 0x1150
 
 
 -- ============================================================
--- KNOWN SNAKE VALUES
+-- REFERENCE POSITION
+--
+-- We observed:
+--
+--   0x0C24
+--
+-- at the position shown in the first screenshot.
+--
+-- From the rendered grid / game image, use this as our
+-- temporary coordinate anchor.
+--
+-- The vertical position was already calculated as row 15.
+--
+-- Visually, the snake head is approximately column 3.
+--
+-- If X is off by exactly one square, only REFERENCE_COLUMN
+-- needs changing.
 -- ============================================================
 
-local SNAKE_TILES = {
+local REFERENCE_ADDRESS = 0x0C24
 
-    [0x2D] = true, -- horizontal head
+local REFERENCE_ROW = 15
 
-    [0x25] = true, -- horizontal body
+local REFERENCE_COLUMN = 3
 
-    [0x23] = true  -- tail
 
-}
+-- ============================================================
+-- SNAKE SHAPE
+-- ============================================================
+
+local SNAKE_LENGTH = 6
 
 
 -- ============================================================
@@ -118,21 +132,8 @@ local function readByte(address)
 end
 
 
-local function isSnake(value)
-
-    return SNAKE_TILES[value] == true
-
-end
-
-
 -- ============================================================
 -- FIND HORIZONTAL SNAKE
---
--- Detect:
---
---   2D 25 25 25 25 23
---
--- at two-byte intervals.
 -- ============================================================
 
 local function findHorizontalSnake()
@@ -160,7 +161,68 @@ end
 
 
 -- ============================================================
--- LOG MOVEMENT
+-- CONVERT ADDRESS DELTA -> GRID MOVEMENT
+--
+-- delta = rows * 0x80 + columns * 0x04
+--
+-- We use the closest row component, then whatever remains
+-- becomes horizontal movement.
+-- ============================================================
+
+local function addressToGrid(address)
+
+    local delta =
+        address - REFERENCE_ADDRESS
+
+
+    -- Determine vertical movement.
+    local rowDelta
+
+    if delta >= 0 then
+
+        rowDelta =
+            math.floor(
+                delta / ROW_STRIDE
+            )
+
+    else
+
+        rowDelta =
+            math.ceil(
+                delta / ROW_STRIDE
+            )
+
+    end
+
+
+    -- Remove vertical portion.
+    local remainder =
+        delta
+        - rowDelta * ROW_STRIDE
+
+
+    -- Remaining bytes represent horizontal movement.
+    local columnDelta =
+        remainder / COLUMN_STRIDE
+
+
+    local row =
+        REFERENCE_ROW
+        + rowDelta
+
+
+    local column =
+        REFERENCE_COLUMN
+        + columnDelta
+
+
+    return row, column
+
+end
+
+
+-- ============================================================
+-- CONSOLE LOGGING
 -- ============================================================
 
 local function logHead(address)
@@ -175,12 +237,18 @@ local function logHead(address)
     end
 
 
+    local row, column =
+        addressToGrid(address)
+
+
     if lastHead == nil then
 
         console.log(
             string.format(
-                "Head detected: 0x%04X",
-                address
+                "HEAD 0x%04X -> grid (%d,%d)",
+                address,
+                column,
+                row
             )
         )
 
@@ -192,11 +260,13 @@ local function logHead(address)
 
         console.log(
             string.format(
-                "Head: 0x%04X -> 0x%04X | delta %+d / 0x%X",
+                "HEAD 0x%04X -> 0x%04X | delta %+d / 0x%X -> grid (%d,%d)",
                 lastHead,
                 address,
                 delta,
-                math.abs(delta)
+                math.abs(delta),
+                column,
+                row
             )
         )
 
@@ -210,26 +280,42 @@ end
 
 
 -- ============================================================
--- INITIAL CONSOLE OUTPUT
+-- INITIAL CONSOLE
 -- ============================================================
 
 console.clear()
 
 console.log("Snake grid visualizer")
 console.log("--------------------------------")
-console.log("Confirmed vertical stride: 0x80")
-console.log("Observed horizontal spacing: 0x02")
+
+console.log(
+    "Y stride: 0x80"
+)
+
+console.log(
+    "X stride: 0x04"
+)
+
+console.log(
+    string.format(
+        "Reference: 0x%04X -> (%d,%d)",
+        REFERENCE_ADDRESS,
+        REFERENCE_COLUMN,
+        REFERENCE_ROW
+    )
+)
+
 console.log("--------------------------------")
 
 
 -- ============================================================
--- MAIN
+-- MAIN LOOP
 -- ============================================================
 
 while true do
 
     -- ========================================================
-    -- DETECT CURRENT HORIZONTAL SNAKE
+    -- DETECT
     -- ========================================================
 
     local headAddress =
@@ -246,7 +332,7 @@ while true do
 
 
     -- ========================================================
-    -- SCREEN POSITION
+    -- PANEL
     -- ========================================================
 
     local panelX =
@@ -274,153 +360,11 @@ while true do
 
 
     -- ========================================================
-    -- DRAW EMPTY GRID
+    -- EMPTY GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
 
         for column = 0, GRID_WIDTH - 1 do
 
-            local x =
-                gridX
-                + column * CELL_PIXELS
-
-
-            local y =
-                gridY
-                + row * CELL_PIXELS
-
-
-            gui.drawRectangle(
-                x,
-                y,
-                CELL_PIXELS - 1,
-                CELL_PIXELS - 1,
-                0xFF303030,
-                0xFF000000
-            )
-
-        end
-
-    end
-
-
-    -- ========================================================
-    -- DRAW CURRENT SNAKE
-    --
-    -- For this phase we KNOW:
-    --
-    --   * shape is six cells wide
-    --   * memory advances 2 bytes per snake segment
-    --   * vertical falling movement advances 0x80
-    --
-    -- We do NOT yet know the absolute horizontal origin.
-    --
-    -- So derive the row from the observed address progression
-    -- and temporarily draw the six-cell snake centered.
-    -- ========================================================
-
-    if headAddress ~= nil then
-
-        -- 0x10A4 is the latest confirmed normal falling row
-        -- before the landing representation changes.
-        --
-        -- Treat that as row 24 temporarily.
-        local REFERENCE_ADDRESS =
-            0x10A4
-
-        local REFERENCE_ROW =
-            24
-
-
-        local addressDifference =
-            headAddress
-            - REFERENCE_ADDRESS
-
-
-        local rowOffset =
-            math.floor(
-                addressDifference
-                / ROW_STRIDE
-            )
-
-
-        local snakeRow =
-            REFERENCE_ROW
-            + rowOffset
-
-
-        -- Clamp so malformed/landing states do not draw
-        -- outside the visualization.
-        if snakeRow < 0 then
-            snakeRow = 0
-        end
-
-        if snakeRow >= GRID_HEIGHT then
-            snakeRow =
-                GRID_HEIGHT - 1
-        end
-
-
-        -- We still need to determine the absolute X origin.
-        --
-        -- For now use column 3, roughly matching the
-        -- horizontal position shown in your falling screenshot.
-        local snakeColumn = 3
-
-
-        -- ====================================================
-        -- DRAW SIX SEGMENTS
-        -- ====================================================
-
-        for segment = 0, 5 do
-
-            local column =
-                snakeColumn
-                + segment
-
-
-            if
-                column >= 0 and
-                column < GRID_WIDTH
-            then
-
-                local x =
-                    gridX
-                    + column * CELL_PIXELS
-
-
-                local y =
-                    gridY
-                    + snakeRow * CELL_PIXELS
-
-
-                gui.drawRectangle(
-                    x,
-                    y,
-                    CELL_PIXELS - 1,
-                    CELL_PIXELS - 1,
-                    0xFFFFFFFF,
-                    0xFF00FF40
-                )
-
-            end
-
-        end
-
-
-        -- Console only.
-        console.log(
-            string.format(
-                "Mapped head 0x%04X -> row %d",
-                headAddress,
-                snakeRow
-            )
-        )
-
-    end
-
-
-    emu.frameadvance()
-
-end
+           
