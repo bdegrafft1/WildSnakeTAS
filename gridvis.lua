@@ -71,8 +71,8 @@ end
 while true do
     -- Right-side padding begins PANEL_WIDTH pixels before the
     -- complete buffer's right edge.
-    local panelX = client.bufferwidth() - PANEL_WIDTH
-    local panelY = PANEL_MARGIN
+    local panelX = client.bufferwidth()
+    local panelY = PANEL_MARGIN - 16
 
     -- Panel background
     gui.drawRectangle(
