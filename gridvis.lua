@@ -1,38 +1,31 @@
 -- BizHawk Lua
 -- 12x26 Snake Grid Visualizer
 --
--- CURRENT GOAL:
--- Prove the bottom-row alignment using the snake sequence
--- that we have actually found in live WRAM.
+-- Phase 1:
+--   Black = empty / unknown
+--   Green = known snake sprite
 --
--- Confirmed live WRAM:
+-- CONFIRMED:
 --
---   0x10E8 = 2D  head
---   0x10EA = 25  body
---   0x10EC = 25  body
---   0x10EE = 25  body
---   0x10F0 = 25  body
---   0x10F2 = 23  tail
+-- Bottom row:
 --
--- The snake visually occupies:
+--   column 0  = 0x10DC
+--   column 6  = 0x10E8 = 2D
+--   column 7  = 0x10EA = 25
+--   column 8  = 0x10EC = 25
+--   column 9  = 0x10EE = 25
+--   column 10 = 0x10F0 = 25
+--   column 11 = 0x10F2 = 23
 --
---   row 25
---   columns 6,7,8,9,10,11
+-- This version does NOT assume a fixed vertical row stride.
 --
--- Therefore the bottom row begins:
---
---   0x10E8 - (6 * 2)
---   = 0x10DC
---
--- IMPORTANT:
--- We are NOT assuming a row stride yet.
--- Only the confirmed bottom row is reading actual WRAM.
+-- Instead, it searches backwards from the confirmed bottom
+-- row for candidate board rows.
 
 local DOMAIN = "WRAM"
 
-
 -- ============================================================
--- GRID SIZE
+-- GRID
 -- ============================================================
 
 local GRID_WIDTH  = 12
@@ -42,16 +35,21 @@ local CELL_SIZE = 2
 
 
 -- ============================================================
--- CONFIRMED MEMORY
+-- CONFIRMED BOTTOM ROW
 -- ============================================================
 
 local BOTTOM_ROW_BASE = 0x10DC
 
+
+-- ============================================================
+-- KNOWN SNAKE TILE VALUES
+-- ============================================================
+
 local SNAKE_TILES = {
 
-    [0x2D] = true, -- head
+    [0x2D] = true, -- right-facing head
 
-    [0x25] = true, -- body
+    [0x25] = true, -- horizontal body
 
     [0x23] = true  -- tail
 
@@ -59,7 +57,22 @@ local SNAKE_TILES = {
 
 
 -- ============================================================
--- VISUAL SETTINGS
+-- EMPTY / NORMAL BOARD TILE
+--
+-- The raw dump repeatedly shows:
+--
+--     01 08
+--
+-- for empty board locations.
+--
+-- So 01 is treated as an empty playable tile.
+-- ============================================================
+
+local EMPTY_TILE = 0x01
+
+
+-- ============================================================
+-- DISPLAY
 -- ============================================================
 
 local CELL_PIXELS = 8
@@ -72,12 +85,8 @@ local PANEL_WIDTH =
 local PANEL_HEIGHT =
     GRID_HEIGHT * CELL_PIXELS
     + PANEL_MARGIN * 2
-    + 30
+    + 22
 
-
--- ============================================================
--- ADD SPACE TO RIGHT SIDE
--- ============================================================
 
 client.SetGameExtraPadding(
     0,
@@ -91,26 +100,172 @@ client.SetGameExtraPadding(
 -- HELPERS
 -- ============================================================
 
-local function isSnakeTile(tile)
+local function isSnakeTile(value)
 
-    return SNAKE_TILES[tile] == true
+    return SNAKE_TILES[value] == true
 
 end
 
 
-local function readBottomCell(column)
+local function readByte(address)
 
-    local address =
+    return memory.read_u8(
+        address,
+        DOMAIN
+    )
+
+end
+
+
+-- ============================================================
+-- ROW DETECTION
+--
+-- A board row should contain 12 consecutive 2-byte entries.
+--
+-- Empty playable locations usually look like:
+--
+--   01 08
+--
+-- Snake locations look like:
+--
+--   XX 08
+--
+-- So the strongest structural marker is currently the
+-- attribute byte 08.
+--
+-- This function gives a candidate row a score based on
+-- how many of its 12 cells have attribute == 08.
+-- ============================================================
+
+local function rowScore(baseAddress)
+
+    local score = 0
+
+    for column = 0, GRID_WIDTH - 1 do
+
+        local address =
+            baseAddress
+            + column * CELL_SIZE
+
+        local attribute =
+            readByte(address + 1)
+
+        if attribute == 0x08 then
+
+            score =
+                score + 1
+
+        end
+
+    end
+
+    return score
+
+end
+
+
+-- ============================================================
+-- FIND PREVIOUS ROW
+--
+-- Search backwards from the current row.
+--
+-- From the supplied memory dump, rows appear to have other
+-- structures between them, so we search rather than assume
+-- 0x40.
+--
+-- A perfect candidate has 12/12 attribute bytes == 08.
+-- ============================================================
+
+local function findPreviousRow(currentBase)
+
+    -- Avoid accidentally finding the current row shifted by
+    -- only one or two cells.
+    local searchStart =
+        currentBase - 0x18
+
+    -- Search up to 0x100 bytes backwards.
+    local searchEnd =
+        currentBase - 0x100
+
+    local bestAddress = nil
+    local bestScore = -1
+
+    -- Keep addresses even because cells are 2-byte entries.
+    if searchStart % 2 ~= 0 then
+
+        searchStart =
+            searchStart - 1
+
+    end
+
+
+    for candidate = searchStart, searchEnd, -2 do
+
+        local score =
+            rowScore(candidate)
+
+        if score > bestScore then
+
+            bestScore =
+                score
+
+            bestAddress =
+                candidate
+
+        end
+
+
+        -- 12/12 is good enough.
+        if score == GRID_WIDTH then
+
+            return candidate, score
+
+        end
+
+    end
+
+
+    return bestAddress, bestScore
+
+end
+
+
+-- ============================================================
+-- BUILD ROW TABLE
+--
+-- rowBases[26] = confirmed bottom
+-- then search backwards to rowBases[1].
+-- ============================================================
+
+local function buildRowTable()
+
+    local rows = {}
+    local scores = {}
+
+    rows[GRID_HEIGHT] =
         BOTTOM_ROW_BASE
-        + column * CELL_SIZE
 
-    local tile =
-        memory.read_u8(
-            address,
-            DOMAIN
-        )
+    scores[GRID_HEIGHT] =
+        rowScore(BOTTOM_ROW_BASE)
 
-    return tile, address
+
+    for row = GRID_HEIGHT - 1, 1, -1 do
+
+        local previousAddress, score =
+            findPreviousRow(
+                rows[row + 1]
+            )
+
+        rows[row] =
+            previousAddress
+
+        scores[row] =
+            score
+
+    end
+
+
+    return rows, scores
 
 end
 
@@ -121,20 +276,22 @@ end
 
 while true do
 
+    local rowBases, rowScores =
+        buildRowTable()
+
+
     local panelX =
         client.bufferwidth()
-
-    local panelY = 0
 
     local gridX =
         panelX + PANEL_MARGIN
 
     local gridY =
-        PANEL_MARGIN
+        8
 
 
     -- ========================================================
-    -- PANEL BACKGROUND
+    -- BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
@@ -148,20 +305,47 @@ while true do
 
 
     -- ========================================================
-    -- DRAW EMPTY 12x26 GRID
+    -- DRAW 12x26 GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
 
+        local rowBase =
+            rowBases[row + 1]
+
+
         for column = 0, GRID_WIDTH - 1 do
+
+            local address =
+                rowBase
+                + column * CELL_SIZE
+
+
+            local tile =
+                readByte(address)
+
 
             local x =
                 gridX
                 + column * CELL_PIXELS
 
+
             local y =
                 gridY
                 + row * CELL_PIXELS
+
+
+            local fillColor =
+                0xFF000000
+
+
+            if isSnakeTile(tile) then
+
+                fillColor =
+                    0xFF00FF40
+
+            end
+
 
             gui.drawRectangle(
                 x,
@@ -169,7 +353,7 @@ while true do
                 CELL_PIXELS - 1,
                 CELL_PIXELS - 1,
                 0xFF303030,
-                0xFF000000
+                fillColor
             )
 
         end
@@ -178,115 +362,44 @@ while true do
 
 
     -- ========================================================
-    -- DRAW CONFIRMED BOTTOM ROW
+    -- DEBUG
     --
-    -- This explicitly reads:
-    --
-    -- column 0  = 10DC
-    -- column 1  = 10DE
-    -- column 2  = 10E0
-    -- column 3  = 10E2
-    -- column 4  = 10E4
-    -- column 5  = 10E6
-    -- column 6  = 10E8
-    -- column 7  = 10EA
-    -- column 8  = 10EC
-    -- column 9  = 10EE
-    -- column 10 = 10F0
-    -- column 11 = 10F2
-    -- ========================================================
-
-    local bottomRow =
-        GRID_HEIGHT - 1
-
-    local debugValues = ""
-
-
-    for column = 0, GRID_WIDTH - 1 do
-
-        local tile, address =
-            readBottomCell(column)
-
-
-        local x =
-            gridX
-            + column * CELL_PIXELS
-
-
-        local y =
-            gridY
-            + bottomRow * CELL_PIXELS
-
-
-        local fillColor =
-            0xFF000000
-
-
-        if isSnakeTile(tile) then
-
-            fillColor =
-                0xFF00FF40
-
-        end
-
-
-        gui.drawRectangle(
-            x,
-            y,
-            CELL_PIXELS - 1,
-            CELL_PIXELS - 1,
-            0xFFFFFFFF,
-            fillColor
-        )
-
-
-        debugValues =
-            debugValues
-            .. string.format(
-                "%02X ",
-                tile
-            )
-
-    end
-
-
-    -- ========================================================
-    -- EXPECTED:
-    --
-    -- ?? ?? ?? ?? ?? ?? 2D 25 25 25 25 23
-    --
+    -- Show detected top and bottom row addresses.
     -- ========================================================
 
     local debugY =
         gridY
         + GRID_HEIGHT * CELL_PIXELS
-        + 4
+        + 3
 
 
     gui.pixelText(
         panelX + 1,
         debugY,
-        debugValues,
+        string.format(
+            "TOP:%04X BOT:%04X",
+            rowBases[1],
+            rowBases[GRID_HEIGHT]
+        ),
         0xFFFFFFFF,
         0xFF000000
     )
 
 
     -- ========================================================
-    -- DIRECTLY READ CONFIRMED SEQUENCE
-    --
-    -- This gives us a second independent check.
+    -- BOTTOM ROW VERIFY
     -- ========================================================
 
     local verify = ""
 
-    for address = 0x10E8, 0x10F2, 2 do
+    for column = 0, GRID_WIDTH - 1 do
+
+        local address =
+            BOTTOM_ROW_BASE
+            + column * CELL_SIZE
 
         local value =
-            memory.read_u8(
-                address,
-                DOMAIN
-            )
+            readByte(address)
 
         verify =
             verify
@@ -301,21 +414,8 @@ while true do
     gui.pixelText(
         panelX + 1,
         debugY + 9,
-        "SEQ: " .. verify,
+        verify,
         0xFF00FF40,
-        0xFF000000
-    )
-
-
-    -- ========================================================
-    -- ADDRESS INFO
-    -- ========================================================
-
-    gui.pixelText(
-        panelX + 1,
-        debugY + 18,
-        "ROW: 10DC-10F2",
-        0xFFAAAAAA,
         0xFF000000
     )
 
