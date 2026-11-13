@@ -352,4 +352,390 @@ local function buildClusters(candidates, lookup)
             if #cluster >= MIN_CLUSTER_SIZE then
 
                 clusters[#clusters + 1] =
-                   
+                    cluster
+
+            end
+
+        end
+
+    end
+
+
+    return clusters
+
+end
+
+
+-- ============================================================
+-- CHOOSE BEST CLUSTER
+--
+-- For phase 1, use the largest connected cluster.
+-- ============================================================
+
+local function chooseSnake(clusters)
+
+    local best = nil
+
+
+    for i = 1, #clusters do
+
+        local cluster =
+            clusters[i]
+
+
+        if
+            best == nil or
+            #cluster > #best
+        then
+
+            best =
+                cluster
+
+        end
+
+    end
+
+
+    return best
+
+end
+
+
+-- ============================================================
+-- MAP CLUSTER INTO REAL 12x26 GRID
+-- ============================================================
+
+local function mapSnake(cluster)
+
+    local output = {}
+
+
+    if cluster == nil then
+        return output
+    end
+
+
+    for i = 1, #cluster do
+
+        local entry =
+            cluster[i]
+
+
+        local row, column =
+            gameCoordinates(
+                entry.address
+            )
+
+
+        if
+            column >= 0 and
+            column < GRID_WIDTH and
+            row >= 0 and
+            row < GRID_HEIGHT
+        then
+
+            output[#output + 1] = {
+
+                address = entry.address,
+
+                value = entry.value,
+
+                row = row,
+
+                column = column
+
+            }
+
+        end
+
+    end
+
+
+    return output
+
+end
+
+
+-- ============================================================
+-- CONSOLE DEBUG
+-- ============================================================
+
+local function logSnake(cluster)
+
+    local parts = {}
+
+
+    if cluster ~= nil then
+
+        for i = 1, #cluster do
+
+            local entry =
+                cluster[i]
+
+
+            parts[#parts + 1] =
+                string.format(
+                    "%04X:%02X",
+                    entry.address,
+                    entry.value
+                )
+
+        end
+
+    end
+
+
+    local signature =
+        table.concat(
+            parts,
+            "|"
+        )
+
+
+    if signature == previousSignature then
+        return
+    end
+
+
+    previousSignature =
+        signature
+
+
+    if cluster == nil then
+
+        console.log(
+            "Snake cluster: none"
+        )
+
+        return
+
+    end
+
+
+    console.log(
+        string.format(
+            "Snake cluster: %d cells",
+            #cluster
+        )
+    )
+
+
+    for i = 1, #cluster do
+
+        local entry =
+            cluster[i]
+
+
+        local rawRow, rawColumn =
+            rawCoordinates(
+                entry.address
+            )
+
+
+        local gameRow, gameColumn =
+            gameCoordinates(
+                entry.address
+            )
+
+
+        console.log(
+            string.format(
+                "  0x%04X=%02X raw=(%d,%d) game=(%d,%d)",
+                entry.address,
+                entry.value,
+                rawColumn,
+                rawRow,
+                gameColumn,
+                gameRow
+            )
+        )
+
+    end
+
+
+    console.log(
+        "--------------------------------"
+    )
+
+end
+
+
+-- ============================================================
+-- STARTUP
+-- ============================================================
+
+console.clear()
+
+
+console.log(
+    "12x26 snake visualizer"
+)
+
+
+console.log(
+    string.format(
+        "Playfield raw X origin: %d",
+        PLAYFIELD_RAW_COLUMN
+    )
+)
+
+
+console.log(
+    string.format(
+        "Playfield raw Y origin: %d",
+        PLAYFIELD_RAW_ROW
+    )
+)
+
+
+console.log(
+    "X step = 0x02"
+)
+
+
+console.log(
+    "Y step = 0x40"
+)
+
+
+console.log(
+    "--------------------------------"
+)
+
+
+-- ============================================================
+-- MAIN LOOP
+-- ============================================================
+
+while true do
+
+    -- ========================================================
+    -- DETECT SNAKE
+    -- ========================================================
+
+    local candidates, lookup =
+        scanCandidates()
+
+
+    local clusters =
+        buildClusters(
+            candidates,
+            lookup
+        )
+
+
+    local cluster =
+        chooseSnake(
+            clusters
+        )
+
+
+    logSnake(
+        cluster
+    )
+
+
+    local snake =
+        mapSnake(
+            cluster
+        )
+
+
+    -- ========================================================
+    -- PANEL POSITION
+    -- ========================================================
+
+    local panelX =
+        client.bufferwidth()
+
+
+    local gridX =
+        panelX +
+        PANEL_MARGIN
+
+
+    local gridY =
+        PANEL_MARGIN
+
+
+    -- ========================================================
+    -- BACKGROUND
+    -- ========================================================
+
+    gui.drawRectangle(
+        panelX,
+        0,
+        PANEL_WIDTH - 1,
+        PANEL_HEIGHT,
+        0xFF202020,
+        0xFF101010
+    )
+
+
+    -- ========================================================
+    -- EXACTLY 12 x 26 GRID
+    -- ========================================================
+
+    for row = 0, GRID_HEIGHT - 1 do
+
+        for column = 0, GRID_WIDTH - 1 do
+
+            local x =
+                gridX +
+                column * CELL_PIXELS
+
+
+            local y =
+                gridY +
+                row * CELL_PIXELS
+
+
+            gui.drawRectangle(
+                x,
+                y,
+                CELL_PIXELS - 1,
+                CELL_PIXELS - 1,
+                0xFF404040,
+                0xFF000000
+            )
+
+        end
+
+    end
+
+
+    -- ========================================================
+    -- DRAW SNAKE
+    -- ========================================================
+
+    for i = 1, #snake do
+
+        local cell =
+            snake[i]
+
+
+        local x =
+            gridX +
+            cell.column * CELL_PIXELS
+
+
+        local y =
+            gridY +
+            cell.row * CELL_PIXELS
+
+
+        gui.drawRectangle(
+            x,
+            y,
+            CELL_PIXELS - 1,
+            CELL_PIXELS - 1,
+            0xFFFFFFFF,
+            0xFF00FF40
+        )
+
+    end
+
+
+    emu.frameadvance()
+
+end
