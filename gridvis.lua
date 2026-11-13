@@ -1,20 +1,16 @@
 -- BizHawk Lua
 -- Snake memory diagnostic
 --
--- Purpose:
---   Scan the known WRAM range and identify where the
---   known snake tile values actually occur.
+-- Goal:
+-- Find the actual memory locations being used for the snake.
+--
+-- Black = everything else
+-- Green = known snake sprite values
 --
 -- Known snake values:
---   2D = right-facing head
+--   2D = head facing right
 --   25 = horizontal body
 --   23 = tail
---
--- Visualization:
---   Black = everything else
---   Green = known snake tile
---
--- Additionally prints the addresses of every match.
 
 local DOMAIN = "WRAM"
 
@@ -29,7 +25,7 @@ local CELL_SIZE = 2
 
 
 -- ============================================================
--- RAW MEMORY DISPLAY
+-- RAW MEMORY GRID
 -- ============================================================
 
 local DISPLAY_WIDTH = 32
@@ -46,11 +42,11 @@ local DISPLAY_HEIGHT =
 
 
 -- ============================================================
--- VISUAL SETTINGS
+-- DISPLAY SETTINGS
 -- ============================================================
 
-local CELL_PIXELS = 5
-local PANEL_MARGIN = 4
+local CELL_PIXELS = 7
+local PANEL_MARGIN = 6
 
 local PANEL_WIDTH =
     DISPLAY_WIDTH * CELL_PIXELS
@@ -58,24 +54,22 @@ local PANEL_WIDTH =
 
 local PANEL_HEIGHT =
     DISPLAY_HEIGHT * CELL_PIXELS
-    + PANEL_MARGIN * 2
+    + 80
 
 
 -- ============================================================
--- KNOWN SNAKE TILE VALUES
+-- KNOWN SNAKE TILES
 -- ============================================================
 
 local SNAKE_TILES = {
-
-    [0x2D] = true, -- head
-    [0x25] = true, -- body
-    [0x23] = true  -- tail
-
+    [0x2D] = true,
+    [0x25] = true,
+    [0x23] = true
 }
 
 
 -- ============================================================
--- EXTRA SCREEN SPACE
+-- BORDER / EXTRA SPACE
 -- ============================================================
 
 client.SetGameExtraPadding(
@@ -87,18 +81,17 @@ client.SetGameExtraPadding(
 
 
 -- ============================================================
--- HELPERS
+-- FUNCTIONS
 -- ============================================================
 
 local function isSnakeTile(value)
 
     return SNAKE_TILES[value] == true
-
 end
 
 
 -- ============================================================
--- MAIN LOOP
+-- MAIN
 -- ============================================================
 
 while true do
@@ -106,20 +99,16 @@ while true do
     local panelX =
         client.bufferwidth()
 
-    local gridX =
-        panelX + PANEL_MARGIN
-
-    local gridY =
-        18
+    local panelY = 0
 
 
     -- ========================================================
-    -- BACKGROUND
+    -- PANEL BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
         panelX,
-        0,
+        panelY,
         PANEL_WIDTH - 1,
         client.bufferheight(),
         0xFF404040,
@@ -127,25 +116,126 @@ while true do
     )
 
 
+    -- ========================================================
+    -- SCAN FOR MATCHES FIRST
+    -- ========================================================
+
+    local matches = {}
+
+    for index = 0, ENTRY_COUNT - 1 do
+
+        local address =
+            START_ADDR
+            + index * CELL_SIZE
+
+        local value =
+            memory.read_u8(
+                address,
+                DOMAIN
+            )
+
+        if isSnakeTile(value) then
+
+            matches[#matches + 1] = {
+                address = address,
+                value = value,
+                index = index
+            }
+
+        end
+
+    end
+
+
+    -- ========================================================
+    -- HEADER
+    -- ========================================================
+
     gui.pixelText(
         panelX + PANEL_MARGIN,
         2,
-        "RAW WRAM",
+        string.format(
+            "Snake matches: %d",
+            #matches
+        ),
         0xFFFFFFFF,
         0xFF101010
     )
 
 
     -- ========================================================
-    -- MATCH LIST
+    -- PRINT MATCHED ADDRESSES
+    --
+    -- This is intentionally at the TOP now.
     -- ========================================================
 
-    local matches = {}
+    local textX =
+        panelX + PANEL_MARGIN
+
+    local textY = 12
+
+    local line = ""
+
+    for i = 1, #matches do
+
+        local match =
+            matches[i]
+
+        line =
+            line ..
+            string.format(
+                "%04X=%02X ",
+                match.address,
+                match.value
+            )
+
+        -- Four entries per line
+        if i % 4 == 0 then
+
+            gui.pixelText(
+                textX,
+                textY,
+                line,
+                0xFFFFFFFF,
+                0xFF101010
+            )
+
+            textY =
+                textY + 9
+
+            line = ""
+
+        end
+
+    end
+
+
+    -- Output remaining entries
+    if line ~= "" then
+
+        gui.pixelText(
+            textX,
+            textY,
+            line,
+            0xFFFFFFFF,
+            0xFF101010
+        )
+
+        textY =
+            textY + 9
+    end
 
 
     -- ========================================================
-    -- SCAN MEMORY
+    -- RAW MEMORY GRID
     -- ========================================================
+
+    local gridX =
+        panelX + PANEL_MARGIN
+
+    local gridY =
+        textY + 5
+
 
     for index = 0, ENTRY_COUNT - 1 do
 
@@ -190,13 +280,6 @@ while true do
             fillColor =
                 0xFF00FF40
 
-
-            -- Save matched address/value
-            matches[#matches + 1] = {
-                address = address,
-                value = value
-            }
-
         end
 
 
@@ -213,109 +296,72 @@ while true do
 
 
     -- ========================================================
-    -- DISPLAY MATCHED ADDRESSES
+    -- FIND CONSECUTIVE SNAKE SEQUENCES
+    --
+    -- We're specifically interested in:
+    --
+    -- 2D 25 25 25 25 23
+    --
+    -- with each tile 2 bytes apart.
     -- ========================================================
 
-    local textX =
-        panelX + 1
+    local sequenceAddress = nil
 
-    local textY =
-        gridY
-        + DISPLAY_HEIGHT * CELL_PIXELS
-        + 4
+    for address = START_ADDR, END_ADDR - 10, 2 do
 
-
-    gui.pixelText(
-        textX,
-        textY,
-        "MATCHES:",
-        0xFFFFFFFF,
-        0xFF000000
-    )
+        local v1 = memory.read_u8(address, DOMAIN)
+        local v2 = memory.read_u8(address + 2, DOMAIN)
+        local v3 = memory.read_u8(address + 4, DOMAIN)
+        local v4 = memory.read_u8(address + 6, DOMAIN)
+        local v5 = memory.read_u8(address + 8, DOMAIN)
+        local v6 = memory.read_u8(address + 10, DOMAIN)
 
 
-    textY =
-        textY + 9
+        if
+            v1 == 0x2D and
+            v2 == 0x25 and
+            v3 == 0x25 and
+            v4 == 0x25 and
+            v5 == 0x25 and
+            v6 == 0x23
+        then
 
-
-    -- Break the output across several lines so it fits.
-    local line = ""
-    local itemsOnLine = 0
-
-
-    for i = 1, #matches do
-
-        local entry =
-            matches[i]
-
-
-        local item =
-            string.format(
-                "%04X=%02X ",
-                entry.address,
-                entry.value
-            )
-
-
-        line =
-            line .. item
-
-
-        itemsOnLine =
-            itemsOnLine + 1
-
-
-        if itemsOnLine >= 3 then
-
-            gui.pixelText(
-                textX,
-                textY,
-                line,
-                0xFFFFFFFF,
-                0xFF000000
-            )
-
-
-            textY =
-                textY + 9
-
-
-            line = ""
-            itemsOnLine = 0
+            sequenceAddress = address
+            break
 
         end
 
     end
 
 
-    -- Print remaining items
-    if line ~= "" then
+    -- ========================================================
+    -- DISPLAY EXACT SEQUENCE RESULT
+    -- ========================================================
+
+    if sequenceAddress ~= nil then
 
         gui.pixelText(
-            textX,
-            textY,
-            line,
-            0xFFFFFFFF,
+            panelX + PANEL_MARGIN,
+            client.bufferheight() - 20,
+            string.format(
+                "SNAKE FOUND @ %04X",
+                sequenceAddress
+            ),
+            0xFF00FF40,
+            0xFF000000
+        )
+
+    else
+
+        gui.pixelText(
+            panelX + PANEL_MARGIN,
+            client.bufferheight() - 20,
+            "Snake sequence not found",
+            0xFFFF4040,
             0xFF000000
         )
 
     end
-
-
-    -- ========================================================
-    -- MATCH COUNT
-    -- ========================================================
-
-    gui.pixelText(
-        textX,
-        textY + 12,
-        string.format(
-            "Count: %d",
-            #matches
-        ),
-        0xFFFFFFFF,
-        0xFF000000
-    )
 
 
     emu.frameadvance()
