@@ -1,37 +1,50 @@
 -- BizHawk Lua
 -- 12x26 First-Snake Grid Visualizer
 --
+-- Phase 1:
+--   ONLY display first-snake tiles that we have actually
+--   observed.
+--
 -- DISPLAY:
---   Black = empty / background / unknown
---   Green = likely first-snake tile
+--   Black = everything else
+--   Green = confirmed first-snake tile
 --
 -- CONSOLE:
---   Logs changes to detected snake tiles only
+--   Logs confirmed snake tile positions only when they change.
 --
--- Confirmed memory structure:
+-- Confirmed tile structure:
 --
---   One tile = 2 bytes:
+--   Each actual tile appears to be:
 --
---       byte 0 = tile / sprite ID
---       byte 1 = attribute
+--       [tile ID] [attribute]
 --
---   Horizontal stride = 0x02
---   Vertical stride   = 0x80
+--   Empty:
 --
--- Examples from captured bent snake:
+--       01 08
 --
---   28 08
---   25 08
---   24 08
+-- Confirmed first-snake IDs so far:
 --
--- Previously captured horizontal snake:
+--   23
+--   25
+--   28
+--   2A
+--   2D
 --
---   2D 08
---   25 08
---   25 08
---   25 08
---   25 08
---   23 08
+-- IMPORTANT:
+--
+-- The previous diagnostic grouped four bytes together.
+-- Those were actually TWO adjacent 2-byte tiles.
+--
+-- So:
+--
+--   28 08 25 08
+--
+-- means:
+--
+--   tile 28
+--   tile 25
+--
+-- NOT one four-byte cell.
 
 local DOMAIN = "WRAM"
 
@@ -48,56 +61,82 @@ local PANEL_MARGIN = 8
 
 
 -- ============================================================
--- MEMORY GEOMETRY
+-- TILEMAP GEOMETRY
 -- ============================================================
 
-local COLUMN_STRIDE = 0x02
-local ROW_STRIDE    = 0x80
+-- Actual tiles are two bytes.
+local CELL_SIZE = 2
 
--- Derived from the captured tilemap:
---
--- Diagnostic row 12 had its first interior tile at 0x0A9C.
---
--- Therefore:
---
---   row 0  = 0x049C
---   row 12 = 0x0A9C
---   row 22 = 0x0F9C
---
--- Some upper rows may belong to another tilemap buffer.
--- For now, invalid/unrecognized data remains black.
-local GRID_BASE = 0x049C
+-- Vertical separation observed while falling.
+local ROW_STRIDE = 0x80
 
 
 -- ============================================================
--- TILE DEFINITIONS
+-- MEMORY ANCHOR
+--
+-- From the diagnostic:
+--
+-- R22 contained:
+--
+--   C02 = 28 08 25 08
+--   C03 = 2A 08 01 08
+--
+-- Because the old diagnostic's "C" was 4 bytes wide:
+--
+-- old C02 corresponds to actual tile columns 4 and 5.
+-- old C03 corresponds to actual tile columns 6 and 7.
+--
+-- However, the playfield itself is 12 columns wide.
+--
+-- Rather than reuse the incorrect old column numbering,
+-- use the observed row buffer directly.
 -- ============================================================
 
-local EMPTY_TILE = 0x01
+-- R22, old C00:
+--
+-- 00 00 F4 08
+--
+-- F4 is the left border, so the first playable tile follows it.
+--
+-- The first playable tile for row 22 therefore begins after
+-- the F4 08 pair.
+local ROW22_BASE = 0x0F9E
 
-local EXPECTED_ATTRIBUTE = 0x08
+
+-- Calculate other rows from the confirmed 0x80 spacing.
+local GRID_BASE =
+    ROW22_BASE -
+    (22 * ROW_STRIDE)
 
 
--- Confirmed first-snake values.
-local CONFIRMED_SNAKE_TILES = {
+-- ============================================================
+-- CONFIRMED FIRST-SNAKE IDS
+-- ============================================================
+
+local SNAKE_TILES = {
+
     [0x23] = true,
-    [0x24] = true,
+
     [0x25] = true,
+
     [0x28] = true,
+
+    [0x2A] = true,
+
     [0x2D] = true
+
 }
 
 
--- For this first-snake diagnostic, values 0x20 through 0x3F
--- with attribute 0x08 are treated as likely snake graphics.
---
--- This should include straight, bent, head and tail variants.
-local SNAKE_TILE_MIN = 0x20
-local SNAKE_TILE_MAX = 0x3F
+-- ============================================================
+-- EXPECTED ATTRIBUTE
+-- ============================================================
+
+local TILE_ATTRIBUTE = 0x08
 
 
 -- ============================================================
--- DISPLAY
+-- PANEL
 -- ============================================================
 
 local PANEL_WIDTH =
@@ -121,7 +160,7 @@ client.SetGameExtraPadding(
 -- STATE
 -- ============================================================
 
-local previousSignature = nil
+local previousSignature = ""
 
 
 -- ============================================================
@@ -138,12 +177,12 @@ local function readByte(address)
 end
 
 
-local function getCellAddress(row, column)
+local function cellAddress(row, column)
 
     return
         GRID_BASE +
         row * ROW_STRIDE +
-        column * COLUMN_STRIDE
+        column * CELL_SIZE
 
 end
 
@@ -151,7 +190,7 @@ end
 local function readCell(row, column)
 
     local address =
-        getCellAddress(
+        cellAddress(
             row,
             column
         )
@@ -171,44 +210,26 @@ end
 
 
 -- ============================================================
--- FIRST-SNAKE CLASSIFICATION
+-- CLASSIFICATION
 -- ============================================================
 
-local function isFirstSnakeTile(tile, attribute)
+local function isSnakeTile(tile, attribute)
 
-    -- Require the tilemap attribute observed on the snake.
-    if attribute ~= EXPECTED_ATTRIBUTE then
+    if attribute ~= TILE_ATTRIBUTE then
         return false
     end
 
 
-    -- Explicitly confirmed values.
-    if CONFIRMED_SNAKE_TILES[tile] then
-        return true
-    end
-
-
-    -- Likely related sprite variants.
-    if
-        tile >= SNAKE_TILE_MIN and
-        tile <= SNAKE_TILE_MAX
-    then
-
-        return true
-
-    end
-
-
-    return false
+    return SNAKE_TILES[tile] == true
 
 end
 
 
 -- ============================================================
--- FIND CURRENT SNAKE TILES
+-- FIND SNAKE CELLS
 -- ============================================================
 
-local function findSnakeTiles()
+local function findSnakeCells()
 
     local matches = {}
 
@@ -224,14 +245,18 @@ local function findSnakeTiles()
                 )
 
 
-            if isFirstSnakeTile(tile, attribute) then
+            if isSnakeTile(tile, attribute) then
 
                 matches[#matches + 1] = {
+
                     row = row,
+
                     column = column,
-                    address = address,
+
                     tile = tile,
-                    attribute = attribute
+
+                    address = address
+
                 }
 
             end
@@ -247,14 +272,12 @@ end
 
 
 -- ============================================================
--- BUILD MATCH SIGNATURE
---
--- Prevents console output every frame.
+-- MATCH SIGNATURE
 -- ============================================================
 
-local function buildMatchSignature(matches)
+local function buildSignature(matches)
 
-    local parts = {}
+    local result = ""
 
 
     for i = 1, #matches do
@@ -263,32 +286,31 @@ local function buildMatchSignature(matches)
             matches[i]
 
 
-        parts[#parts + 1] =
+        result =
+            result ..
             string.format(
-                "%04X:%02X",
-                match.address,
+                "%02d,%02d,%02X|",
+                match.row,
+                match.column,
                 match.tile
             )
 
     end
 
 
-    return table.concat(
-        parts,
-        "|"
-    )
+    return result
 
 end
 
 
 -- ============================================================
--- CONSOLE LOGGING
+-- CONSOLE LOG
 -- ============================================================
 
 local function logMatches(matches)
 
     local signature =
-        buildMatchSignature(
+        buildSignature(
             matches
         )
 
@@ -304,7 +326,7 @@ local function logMatches(matches)
 
     console.log(
         string.format(
-            "Snake tiles detected: %d",
+            "Snake cells: %d",
             #matches
         )
     )
@@ -316,75 +338,54 @@ local function logMatches(matches)
             matches[i]
 
 
-        local confirmation = "candidate"
-
-
-        if CONFIRMED_SNAKE_TILES[match.tile] then
-
-            confirmation = "confirmed"
-
-        end
-
-
         console.log(
             string.format(
-                "  row=%02d col=%02d addr=0x%04X tile=%02X attr=%02X %s",
+                "  row=%02d col=%02d addr=0x%04X tile=%02X",
                 match.row,
                 match.column,
                 match.address,
-                match.tile,
-                match.attribute,
-                confirmation
+                match.tile
             )
         )
 
     end
 
 
-    console.log("--------------------------------")
+    console.log(
+        "--------------------------------"
+    )
 
 end
 
 
 -- ============================================================
--- INITIAL CONSOLE
+-- STARTUP LOG
 -- ============================================================
 
 console.clear()
 
-console.log("First-snake tile visualizer")
-console.log("--------------------------------")
+console.log(
+    "First-snake visualizer"
+)
+
+console.log(
+    "Confirmed IDs: 23 25 28 2A 2D"
+)
+
+console.log(
+    "Empty tile: 01 08"
+)
 
 console.log(
     string.format(
-        "Grid base: 0x%04X",
+        "Grid base candidate: 0x%04X",
         GRID_BASE
     )
 )
 
 console.log(
-    string.format(
-        "Vertical stride: 0x%02X",
-        ROW_STRIDE
-    )
+    "--------------------------------"
 )
-
-console.log(
-    string.format(
-        "Horizontal stride: 0x%02X",
-        COLUMN_STRIDE
-    )
-)
-
-console.log(
-    "Confirmed IDs: 23 24 25 28 2D"
-)
-
-console.log(
-    "Candidate IDs: 20-3F with attribute 08"
-)
-
-console.log("--------------------------------")
 
 
 -- ============================================================
@@ -394,11 +395,11 @@ console.log("--------------------------------")
 while true do
 
     -- ========================================================
-    -- READ CURRENT GRID
+    -- READ SNAKE
     -- ========================================================
 
     local matches =
-        findSnakeTiles()
+        findSnakeCells()
 
 
     logMatches(
@@ -407,7 +408,7 @@ while true do
 
 
     -- ========================================================
-    -- VISUALIZATION POSITION
+    -- DISPLAY POSITION
     -- ========================================================
 
     local panelX =
@@ -422,7 +423,7 @@ while true do
 
 
     -- ========================================================
-    -- PANEL BACKGROUND
+    -- BACKGROUND
     -- ========================================================
 
     gui.drawRectangle(
@@ -436,7 +437,7 @@ while true do
 
 
     -- ========================================================
-    -- DRAW BLACK GRID
+    -- BLACK GRID
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
@@ -446,6 +447,7 @@ while true do
             local x =
                 gridX +
                 column * CELL_PIXELS
+
 
             local y =
                 gridY +
@@ -467,7 +469,7 @@ while true do
 
 
     -- ========================================================
-    -- DRAW DETECTED FIRST-SNAKE TILES
+    -- GREEN SNAKE CELLS
     -- ========================================================
 
     for i = 1, #matches do
@@ -479,6 +481,7 @@ while true do
         local x =
             gridX +
             match.column * CELL_PIXELS
+
 
         local y =
             gridY +
