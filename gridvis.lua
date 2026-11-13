@@ -1,50 +1,31 @@
 -- BizHawk Lua
--- 12x26 First-Snake Grid Visualizer
+-- First Snake Visualizer / Unknown Sprite Finder
 --
--- Phase 1:
---   ONLY display first-snake tiles that we have actually
---   observed.
+-- CONFIRMED FOR CURRENT FRAME:
+--
+--   0x0FA0 = 28 08
+--   0x0FA2 = 25 08
+--   0x0FA4 = 2A 08
+--
+-- These are three pieces of the visible bent snake.
 --
 -- DISPLAY:
---   Black = everything else
---   Green = confirmed first-snake tile
+--
+--   Black  = empty / background
+--   Green  = confirmed snake sprite
+--   Yellow = unknown non-empty tile with attribute 08
 --
 -- CONSOLE:
---   Logs confirmed snake tile positions only when they change.
 --
--- Confirmed tile structure:
+--   Logs unknown candidate tiles near the snake.
 --
---   Each actual tile appears to be:
---
---       [tile ID] [attribute]
---
---   Empty:
---
---       01 08
---
--- Confirmed first-snake IDs so far:
+-- Current confirmed first-snake IDs:
 --
 --   23
 --   25
 --   28
 --   2A
 --   2D
---
--- IMPORTANT:
---
--- The previous diagnostic grouped four bytes together.
--- Those were actually TWO adjacent 2-byte tiles.
---
--- So:
---
---   28 08 25 08
---
--- means:
---
---   tile 28
---   tile 25
---
--- NOT one four-byte cell.
 
 local DOMAIN = "WRAM"
 
@@ -61,52 +42,28 @@ local PANEL_MARGIN = 8
 
 
 -- ============================================================
--- TILEMAP GEOMETRY
+-- MEMORY STRUCTURE
 -- ============================================================
 
--- Actual tiles are two bytes.
-local CELL_SIZE = 2
-
--- Vertical separation observed while falling.
+local CELL_SIZE  = 2
 local ROW_STRIDE = 0x80
 
 
 -- ============================================================
--- MEMORY ANCHOR
+-- CURRENT GRID BASE
 --
--- From the diagnostic:
---
--- R22 contained:
---
---   C02 = 28 08 25 08
---   C03 = 2A 08 01 08
---
--- Because the old diagnostic's "C" was 4 bytes wide:
---
--- old C02 corresponds to actual tile columns 4 and 5.
--- old C03 corresponds to actual tile columns 6 and 7.
---
--- However, the playfield itself is 12 columns wide.
---
--- Rather than reuse the incorrect old column numbering,
--- use the observed row buffer directly.
+-- Keep this unchanged for this diagnostic.
 -- ============================================================
 
--- R22, old C00:
---
--- 00 00 F4 08
---
--- F4 is the left border, so the first playable tile follows it.
---
--- The first playable tile for row 22 therefore begins after
--- the F4 08 pair.
-local ROW22_BASE = 0x0F9E
+local GRID_BASE = 0x049E
 
 
--- Calculate other rows from the confirmed 0x80 spacing.
-local GRID_BASE =
-    ROW22_BASE -
-    (22 * ROW_STRIDE)
+-- ============================================================
+-- TILE FORMAT
+-- ============================================================
+
+local EMPTY_TILE = 0x01
+local TILE_ATTRIBUTE = 0x08
 
 
 -- ============================================================
@@ -129,10 +86,33 @@ local SNAKE_TILES = {
 
 
 -- ============================================================
--- EXPECTED ATTRIBUTE
+-- IGNORE KNOWN BOARD GRAPHICS
+--
+-- These are structural/background pieces we've already seen
+-- in the dump and do not want highlighted as candidates.
 -- ============================================================
 
-local TILE_ATTRIBUTE = 0x08
+local IGNORE_TILES = {
+
+    [0x01] = true,
+
+    [0xF4] = true,
+
+    [0xF5] = true,
+
+    [0xF6] = true,
+
+    [0xF7] = true,
+
+    [0xFC] = true,
+
+    [0xFD] = true,
+
+    [0xFE] = true,
+
+    [0xFF] = true
+
+}
 
 
 -- ============================================================
@@ -142,6 +122,7 @@ local TILE_ATTRIBUTE = 0x08
 local PANEL_WIDTH =
     GRID_WIDTH * CELL_PIXELS +
     PANEL_MARGIN * 2
+
 
 local PANEL_HEIGHT =
     GRID_HEIGHT * CELL_PIXELS +
@@ -160,11 +141,11 @@ client.SetGameExtraPadding(
 -- STATE
 -- ============================================================
 
-local previousSignature = ""
+local previousUnknownSignature = ""
 
 
 -- ============================================================
--- MEMORY HELPERS
+-- MEMORY
 -- ============================================================
 
 local function readByte(address)
@@ -177,7 +158,7 @@ local function readByte(address)
 end
 
 
-local function cellAddress(row, column)
+local function getCellAddress(row, column)
 
     return
         GRID_BASE +
@@ -190,7 +171,7 @@ end
 local function readCell(row, column)
 
     local address =
-        cellAddress(
+        getCellAddress(
             row,
             column
         )
@@ -213,25 +194,44 @@ end
 -- CLASSIFICATION
 -- ============================================================
 
-local function isSnakeTile(tile, attribute)
+local function isConfirmedSnake(tile, attribute)
+
+    return
+        attribute == TILE_ATTRIBUTE and
+        SNAKE_TILES[tile] == true
+
+end
+
+
+local function isUnknownCandidate(tile, attribute)
 
     if attribute ~= TILE_ATTRIBUTE then
         return false
     end
 
 
-    return SNAKE_TILES[tile] == true
+    if SNAKE_TILES[tile] then
+        return false
+    end
+
+
+    if IGNORE_TILES[tile] then
+        return false
+    end
+
+
+    return true
 
 end
 
 
 -- ============================================================
--- FIND SNAKE CELLS
+-- BUILD UNKNOWN LIST
 -- ============================================================
 
-local function findSnakeCells()
+local function findUnknownCandidates()
 
-    local matches = {}
+    local candidates = {}
 
 
     for row = 0, GRID_HEIGHT - 1 do
@@ -245,9 +245,9 @@ local function findSnakeCells()
                 )
 
 
-            if isSnakeTile(tile, attribute) then
+            if isUnknownCandidate(tile, attribute) then
 
-                matches[#matches + 1] = {
+                candidates[#candidates + 1] = {
 
                     row = row,
 
@@ -266,85 +266,73 @@ local function findSnakeCells()
     end
 
 
-    return matches
+    return candidates
 
 end
 
 
 -- ============================================================
--- MATCH SIGNATURE
+-- LOG UNKNOWN CANDIDATES
 -- ============================================================
 
-local function buildSignature(matches)
+local function logUnknownCandidates(candidates)
 
-    local result = ""
-
-
-    for i = 1, #matches do
-
-        local match =
-            matches[i]
+    local parts = {}
 
 
-        result =
-            result ..
+    for i = 1, #candidates do
+
+        local candidate =
+            candidates[i]
+
+
+        parts[#parts + 1] =
             string.format(
-                "%02d,%02d,%02X|",
-                match.row,
-                match.column,
-                match.tile
+                "%04X:%02X",
+                candidate.address,
+                candidate.tile
             )
 
     end
 
 
-    return result
-
-end
-
-
--- ============================================================
--- CONSOLE LOG
--- ============================================================
-
-local function logMatches(matches)
-
     local signature =
-        buildSignature(
-            matches
+        table.concat(
+            parts,
+            "|"
         )
 
 
-    if signature == previousSignature then
+    if signature == previousUnknownSignature then
         return
     end
 
 
-    previousSignature =
+    previousUnknownSignature =
         signature
 
 
     console.log(
         string.format(
-            "Snake cells: %d",
-            #matches
+            "Unknown candidates: %d",
+            #candidates
         )
     )
 
 
-    for i = 1, #matches do
+    for i = 1, #candidates do
 
-        local match =
-            matches[i]
+        local candidate =
+            candidates[i]
 
 
         console.log(
             string.format(
                 "  row=%02d col=%02d addr=0x%04X tile=%02X",
-                match.row,
-                match.column,
-                match.address,
-                match.tile
+                candidate.row,
+                candidate.column,
+                candidate.address,
+                candidate.tile
             )
         )
 
@@ -359,28 +347,25 @@ end
 
 
 -- ============================================================
--- STARTUP LOG
+-- STARTUP
 -- ============================================================
 
 console.clear()
 
 console.log(
-    "First-snake visualizer"
+    "First-snake unknown sprite finder"
+)
+
+console.log(
+    "Green = confirmed snake"
+)
+
+console.log(
+    "Yellow = unknown XX 08 candidate"
 )
 
 console.log(
     "Confirmed IDs: 23 25 28 2A 2D"
-)
-
-console.log(
-    "Empty tile: 01 08"
-)
-
-console.log(
-    string.format(
-        "Grid base candidate: 0x%04X",
-        GRID_BASE
-    )
 )
 
 console.log(
@@ -395,28 +380,30 @@ console.log(
 while true do
 
     -- ========================================================
-    -- READ SNAKE
+    -- FIND UNKNOWN CANDIDATES
     -- ========================================================
 
-    local matches =
-        findSnakeCells()
+    local unknownCandidates =
+        findUnknownCandidates()
 
 
-    logMatches(
-        matches
+    logUnknownCandidates(
+        unknownCandidates
     )
 
 
     -- ========================================================
-    -- DISPLAY POSITION
+    -- VISUALIZATION
     -- ========================================================
 
     local panelX =
         client.bufferwidth()
 
+
     local gridX =
         panelX +
         PANEL_MARGIN
+
 
     local gridY =
         PANEL_MARGIN
@@ -437,12 +424,45 @@ while true do
 
 
     -- ========================================================
-    -- BLACK GRID
+    -- DRAW CELLS
     -- ========================================================
 
     for row = 0, GRID_HEIGHT - 1 do
 
         for column = 0, GRID_WIDTH - 1 do
+
+            local tile, attribute, address =
+                readCell(
+                    row,
+                    column
+                )
+
+
+            local color =
+                0xFF000000
+
+
+            -- Confirmed snake
+            if isConfirmedSnake(
+                tile,
+                attribute
+            ) then
+
+                color =
+                    0xFF00FF40
+
+
+            -- Unknown candidate
+            elseif isUnknownCandidate(
+                tile,
+                attribute
+            ) then
+
+                color =
+                    0xFFFFFF00
+
+            end
+
 
             local x =
                 gridX +
@@ -460,42 +480,10 @@ while true do
                 CELL_PIXELS - 1,
                 CELL_PIXELS - 1,
                 0xFF303030,
-                0xFF000000
+                color
             )
 
         end
-
-    end
-
-
-    -- ========================================================
-    -- GREEN SNAKE CELLS
-    -- ========================================================
-
-    for i = 1, #matches do
-
-        local match =
-            matches[i]
-
-
-        local x =
-            gridX +
-            match.column * CELL_PIXELS
-
-
-        local y =
-            gridY +
-            match.row * CELL_PIXELS
-
-
-        gui.drawRectangle(
-            x,
-            y,
-            CELL_PIXELS - 1,
-            CELL_PIXELS - 1,
-            0xFFFFFFFF,
-            0xFF00FF40
-        )
 
     end
 
