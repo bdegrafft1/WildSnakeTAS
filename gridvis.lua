@@ -271,4 +271,30 @@ while true do
             + GRID_HEIGHT * CELL_PIXELS
             + 3,
         debug,
-        
+        0xFFFFFFFF,
+        0xFF000000
+    )
+
+
+    -- ========================================================
+    -- DEBUG: BASE ADDRESSES
+    -- ========================================================
+
+    gui.pixelText(
+        panelX + 1,
+        gridY
+            + GRID_HEIGHT * CELL_PIXELS
+            + 12,
+        string.format(
+            "BASE:%04X LAST:%04X",
+            GRID_BASE,
+            LAST_ROW_BASE
+        ),
+        0xFFAAAAAA,
+        0xFF000000
+    )
+
+
+    emu.frameadvance()
+
+end
